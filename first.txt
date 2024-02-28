@@ -1,0 +1,34 @@
+trigger:
+- master
+
+pool:
+  vmImage: 'windows-latest'
+
+steps:
+- script: |
+    echo "This is the content of the file" > $(Build.ArtifactStagingDirectory)/sample.txt
+  displayName: 'Create Sample File'
+
+- task: PublishBuildArtifacts@1
+  inputs:
+    pathtoPublish: '$(Build.ArtifactStagingDirectory)'
+    artifactName: 'drop'
+    publishLocation: 'Container'
+
+- task: AzureGitRepository@1
+  inputs:
+    azureSubscriptionEndpoint: '<Your Azure Service Connection>'
+    repository: '<Your Repository Name>'
+    command: 'push'
+    workingDirectory: '$(Build.ArtifactStagingDirectory)'
+    verbose: true
+
+
+Explanation:
+
+The pipeline is triggered on changes to the master branch.
+It runs on a Windows-based agent (windows-latest).
+In the first step, a script is executed to create a sample text file named sample.txt in the $(Build.ArtifactStagingDirectory).
+The second step uses the PublishBuildArtifacts task to publish the content of the ArtifactStagingDirectory as an artifact named 'drop'. This artifact is then available for download in the Azure Pipelines UI.
+The third step uses the AzureGitRepository task to push the changes to the Azure Repository. Make sure to replace <Your Azure Service Connection> and <Your Repository Name> with the appropriate values.
+Note: Ensure that you have the necessary permissions and Service Connection set up for accessing the Azure Repository. Also, consider securing sensitive information such as credentials using Azure Pipelines secret variables.
