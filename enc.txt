@@ -1,0 +1,41 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import udf
+from pyspark.sql.types import StringType
+from Crypto.Cipher import AES
+import base64
+
+# Initialize SparkSession
+spark = SparkSession.builder \
+    .appName("Data Encryption") \
+    .getOrCreate()
+
+# Sample DataFrame with sensitive data
+data = [("John", "Doe", "john.doe@email.com", "123-45-6789"),
+        ("Jane", "Doe", "jane.doe@email.com", "987-65-4321"),
+        ("Alice", "Smith", "alice.smith@email.com", "555-55-5555")]
+
+columns = ["first_name", "last_name", "email", "ssn"]
+
+df = spark.createDataFrame(data, columns)
+
+# Encryption key (16, 24, or 32 bytes long)
+encryption_key = b'This is a 16-byte key'
+
+# Function to encrypt data
+def encrypt_data(data):
+    cipher = AES.new(encryption_key, AES.MODE_EAX)
+    ciphertext, tag = cipher.encrypt_and_digest(data.encode('utf-8'))
+    return base64.b64encode(cipher.nonce + tag + ciphertext).decode('utf-8')
+
+# User-defined function (UDF) for encryption
+encrypt_udf = udf(encrypt_data, StringType())
+
+# Encrypt sensitive columns
+encrypted_df = df.withColumn("email", encrypt_udf("email")) \
+                 .withColumn("ssn", encrypt_udf("ssn"))
+
+# Display encrypted DataFrame
+encrypted_df.show(truncate=False)
+
+# Stop SparkSession
+spark.stop()
