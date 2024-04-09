@@ -39,3 +39,43 @@ encrypted_df.show(truncate=False)
 
 # Stop SparkSession
 spark.stop()
+
+
+
+
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, when
+
+# Initialize SparkSession
+spark = SparkSession.builder \
+    .appName("Data Masking") \
+    .getOrCreate()
+
+# Sample DataFrame with sensitive data
+data = [("John", "Doe", "john.doe@email.com", "123-45-6789"),
+        ("Jane", "Doe", "jane.doe@email.com", "987-65-4321"),
+        ("Alice", "Smith", "alice.smith@email.com", "555-55-5555")]
+
+columns = ["first_name", "last_name", "email", "ssn"]
+
+df = spark.createDataFrame(data, columns)
+
+# Columns to mask
+columns_to_mask = ["email", "ssn"]
+
+# Function to mask sensitive data
+def mask_data(column, data):
+    return "****" if column in columns_to_mask else data
+
+# Masking sensitive columns
+masked_df = df.select(
+    *[when(col(column).isNotNull(), mask_data(column, col(column))).alias(column) for column in df.columns]
+)
+
+# Display masked data
+masked_df.show()
+
+# Stop SparkSession
+spark.stop()
+
