@@ -9,3 +9,24 @@ df_transformed = (
         to_date(col("formatted_date"), "yyyy-MM")  # Convert to DateType
     )
 )
+
+
+
+
+
+
+# Add the prediction_date column
+spark_df = spark_df_orig.withColumn("prediction_date", lit(prediction_run_date))
+
+# Transform the data to create run_date and job_run_date
+spark_df_with_date = (
+    spark_df.withColumn(
+        "run_date",
+        expr("substring(prediction_date, 1, 4) || '-' || substring(prediction_date, 5, 2)")  # Extract YYYY-MM
+    )
+    .withColumn(
+        "job_run_date",
+        to_date(col("run_date"), "yyyy-MM")  # Convert to DateType
+    )
+)
+
