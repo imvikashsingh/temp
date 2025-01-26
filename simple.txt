@@ -1,0 +1,11 @@
+# Transform data
+df_transformed = (
+    df.withColumn(
+        "formatted_date", 
+        expr("substring(date_string, 1, 4) || '-' || substring(date_string, 5, 2)")  # Extract YYYY-MM
+    )
+    .withColumn(
+        "job_run_date", 
+        to_date(col("formatted_date"), "yyyy-MM")  # Convert to DateType
+    )
+)
