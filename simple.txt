@@ -30,3 +30,61 @@ spark_df_with_date = (
     )
 )
 
+
+
+from pyspark.sql import SparkSession
+from google.cloud import bigquery
+
+# Initialize Spark Session
+spark = SparkSession.builder \
+    .appName("BigQuery Partition Check and Delete") \
+    .getOrCreate()
+
+# Define constants
+PROJECT_ID = "<PROJECT_ID>"
+DATASET = "<DATASET>"
+TABLE = "<TABLE>"
+PARTITION_MONTH = "<MONTH>"  # Format: YYYY-MM
+
+def check_and_delete_partition():
+    """
+    Check if data exists for a specific monthly partition in BigQuery, and delete it if present.
+    """
+    # Create a BigQuery client
+    client = bigquery.Client(project=PROJECT_ID)
+
+    # Full table path
+    table_path = f"{PROJECT_ID}.{DATASET}.{TABLE}"
+
+    # Query to check if partition data exists
+    check_query = f"""
+    SELECT COUNT(*) as count
+    FROM `{table_path}`
+    WHERE FORMAT_TIMESTAMP('%Y-%m', TIMESTAMP(<PARTITION_COLUMN>)) = '{PARTITION_MONTH}'
+    """
+
+    # Execute the check query
+    check_job = client.query(check_query)
+    result = check_job.result()
+    row = list(result)[0]
+
+    if row['count'] > 0:
+        print(f"Data exists for partition {PARTITION_MONTH}. Proceeding to delete.")
+
+        # SQL query to delete specific partition data
+        delete_query = f"""
+        DELETE FROM `{table_path}`
+        WHERE FORMAT_TIMESTAMP('%Y-%m', TIMESTAMP(<PARTITION_COLUMN>)) = '{PARTITION_MONTH}'
+        """
+
+        # Execute deletion
+        delete_job = client.query(delete_query)
+        delete_job.result()  # Wait for the job to complete
+
+        print(f"Deleted data for partition {PARTITION_MONTH}")
+    else:
+        print(f"No data found for partition {PARTITION_MONTH}. No action taken.")
+
+if __name__ == "__main__":
+    check_and_delete_partition()
+
