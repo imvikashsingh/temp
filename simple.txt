@@ -1,90 +1,21 @@
-# Transform data
-df_transformed = (
-    df.withColumn(
-        "formatted_date", 
-        expr("substring(date_string, 1, 4) || '-' || substring(date_string, 5, 2)")  # Extract YYYY-MM
-    )
-    .withColumn(
-        "job_run_date", 
-        to_date(col("formatted_date"), "yyyy-MM")  # Convert to DateType
-    )
-)
+from pyspark.sql import DataFrame, types as T
+from data_quality.base_check import BaseDataQualityCheck
 
-
-
-
-
-
-# Add the prediction_date column
-spark_df = spark_df_orig.withColumn("prediction_date", lit(prediction_run_date))
-
-# Transform the data to create run_date and job_run_date
-spark_df_with_date = (
-    spark_df.withColumn(
-        "run_date",
-        expr("substring(prediction_date, 1, 4) || '-' || substring(prediction_date, 5, 2)")  # Extract YYYY-MM
-    )
-    .withColumn(
-        "job_run_date",
-        to_date(col("run_date"), "yyyy-MM")  # Convert to DateType
-    )
-)
-
-
-
-from pyspark.sql import SparkSession
-from google.cloud import bigquery
-
-# Initialize Spark Session
-spark = SparkSession.builder \
-    .appName("BigQuery Partition Check and Delete") \
-    .getOrCreate()
-
-# Define constants
-PROJECT_ID = "<PROJECT_ID>"
-DATASET = "<DATASET>"
-TABLE = "<TABLE>"
-PARTITION_MONTH = "<MONTH>"  # Format: YYYY-MM
-
-def check_and_delete_partition():
+class DataTypeCheck(BaseDataQualityCheck):
     """
-    Check if data exists for a specific monthly partition in BigQuery, and delete it if present.
+    Check if the data types of specified columns match the expected types.
     """
-    # Create a BigQuery client
-    client = bigquery.Client(project=PROJECT_ID)
+    def __init__(self, column_type_mapping: dict, rule_type: str = "hard"):
+        super().__init__(rule_type)
+        self.column_type_mapping = column_type_mapping
 
-    # Full table path
-    table_path = f"{PROJECT_ID}.{DATASET}.{TABLE}"
-
-    # Query to check if partition data exists
-    check_query = f"""
-    SELECT COUNT(*) as count
-    FROM `{table_path}`
-    WHERE FORMAT_TIMESTAMP('%Y-%m', TIMESTAMP(<PARTITION_COLUMN>)) = '{PARTITION_MONTH}'
-    """
-
-    # Execute the check query
-    check_job = client.query(check_query)
-    result = check_job.result()
-    row = list(result)[0]
-
-    if row['count'] > 0:
-        print(f"Data exists for partition {PARTITION_MONTH}. Proceeding to delete.")
-
-        # SQL query to delete specific partition data
-        delete_query = f"""
-        DELETE FROM `{table_path}`
-        WHERE FORMAT_TIMESTAMP('%Y-%m', TIMESTAMP(<PARTITION_COLUMN>)) = '{PARTITION_MONTH}'
+    def check(self, df: DataFrame) -> DataFrame:
         """
-
-        # Execute deletion
-        delete_job = client.query(delete_query)
-        delete_job.result()  # Wait for the job to complete
-
-        print(f"Deleted data for partition {PARTITION_MONTH}")
-    else:
-        print(f"No data found for partition {PARTITION_MONTH}. No action taken.")
-
-if __name__ == "__main__":
-    check_and_delete_partition()
-
+        Ensure the data types of specified columns match the expected types.
+        :param df: Input DataFrame.
+        :return: DataFrame with validated data types.
+        """
+        for column, expected_type in self.column_type_mapping.items():
+            if df.schema[column].dataType != expected_type:
+                self.handle_violation(f"Data type mismatch for column {column}. Expected {expected_type}, found {df.schema[column].dataType}")
+        return df
