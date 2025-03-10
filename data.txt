@@ -1,0 +1,48 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.types import StructType, StructField, IntegerType, StringType, DoubleType
+import random
+import pandas as pd
+
+# Initialize Spark session
+spark = SparkSession.builder.appName("Generate Test Data").getOrCreate()
+
+# Define schema
+schema = StructType([
+    StructField("id", IntegerType(), True),      # Nullable to allow nulls
+    StructField("name", StringType(), True),
+    StructField("value", DoubleType(), True)
+])
+
+# Generate 100 records with intentional quality issues
+def generate_test_data():
+    data = []
+    names = ["Alice", "Bob", "Charlie", "David", "Eve", None]  # Include null name
+    
+    for i in range(100):
+        # Introduce some nulls
+        id_val = i if i % 10 != 0 else None  # Null ID every 10th record
+        name_val = random.choice(names)      # Randomly include null names
+        value_val = random.uniform(0, 2000) if i % 15 != 0 else None  # Null value every 15th record
+        
+        # Introduce duplicates (repeat IDs 5, 15, 25)
+        if i in [50, 60, 70]:
+            id_val = 5 if i == 50 else 15 if i == 60 else 25
+        
+        data.append((id_val, name_val, value_val))
+    
+    return data
+
+# Create DataFrame
+test_data = generate_test_data()
+df = spark.createDataFrame(test_data, schema)
+
+# Save to CSV
+output_path = "test_data.csv"
+df.write.csv(output_path, header=True, mode="overwrite")
+
+# Show sample for verification
+df.show(10, truncate=False)
+print(f"Total records: {df.count()}")
+
+# Stop Spark session
+spark.stop()
