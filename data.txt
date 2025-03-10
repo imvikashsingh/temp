@@ -1,48 +1,43 @@
-from pyspark.sql import SparkSession
-from pyspark.sql.types import StructType, StructField, IntegerType, StringType, DoubleType
-import random
 import pandas as pd
+import numpy as np
+import random
 
-# Initialize Spark session
-spark = SparkSession.builder.appName("Generate Test Data").getOrCreate()
+# Set random seed for reproducibility
+np.random.seed(42)
 
-# Define schema
-schema = StructType([
-    StructField("id", IntegerType(), True),      # Nullable to allow nulls
-    StructField("name", StringType(), True),
-    StructField("value", DoubleType(), True)
-])
-
-# Generate 100 records with intentional quality issues
+# Generate 100 records
 def generate_test_data():
-    data = []
-    names = ["Alice", "Bob", "Charlie", "David", "Eve", None]  # Include null name
+    # Base data
+    data = {
+        "id": list(range(100)),  # Start with sequential IDs
+        "name": [random.choice(["Alice", "Bob", "Charlie", "David", "Eve", None]) for _ in range(100)],
+        "value": [random.uniform(0, 2000) for _ in range(100)]
+    }
     
-    for i in range(100):
-        # Introduce some nulls
-        id_val = i if i % 10 != 0 else None  # Null ID every 10th record
-        name_val = random.choice(names)      # Randomly include null names
-        value_val = random.uniform(0, 2000) if i % 15 != 0 else None  # Null value every 15th record
-        
-        # Introduce duplicates (repeat IDs 5, 15, 25)
-        if i in [50, 60, 70]:
-            id_val = 5 if i == 50 else 15 if i == 60 else 25
-        
-        data.append((id_val, name_val, value_val))
+    # Convert to DataFrame
+    df = pd.DataFrame(data)
     
-    return data
+    # Introduce nulls (hard rule violation)
+    df.loc[df.index % 10 == 0, "id"] = np.nan  # Null ID every 10th record (10 records)
+    df.loc[df.index % 15 == 0, "value"] = np.nan  # Null value every 15th record (7 records)
+    
+    # Introduce duplicates (soft rule violation)
+    df.loc[50, "id"] = 5  # Duplicate ID 5
+    df.loc[60, "id"] = 15  # Duplicate ID 15
+    df.loc[70, "id"] = 25  # Duplicate ID 25
+    
+    return df
 
-# Create DataFrame
-test_data = generate_test_data()
-df = spark.createDataFrame(test_data, schema)
+# Generate data
+test_df = generate_test_data()
 
 # Save to CSV
-output_path = "test_data.csv"
-df.write.csv(output_path, header=True, mode="overwrite")
+output_path = "test_data_pandas.csv"
+test_df.to_csv(output_path, index=False)
 
-# Show sample for verification
-df.show(10, truncate=False)
-print(f"Total records: {df.count()}")
-
-# Stop Spark session
-spark.stop()
+# Display sample and stats for verification
+print("Sample of first 10 records:")
+print(test_df.head(10))
+print("\nTotal records:", len(test_df))
+print("Null counts:\n", test_df.isnull().sum())
+print("Duplicate ID count:", test_df.duplicated(subset=["id"]).sum())
