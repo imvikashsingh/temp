@@ -19,3 +19,32 @@ class DataTypeCheck(BaseDataQualityCheck):
             if df.schema[column].dataType != expected_type:
                 self.handle_violation(f"Data type mismatch for column {column}. Expected {expected_type}, found {df.schema[column].dataType}")
         return df
+
+
+
+
+
+
+from pyspark.sql import DataFrame, types as T
+from data_quality.base_check import BaseDataQualityCheck
+
+class SchemaCheck(BaseDataQualityCheck):
+    """
+    Check if the schema of the DataFrame matches the expected schema.
+    """
+    def __init__(self, expected_schema: dict, rule_type: str = "hard"):
+        super().__init__(rule_type)
+        self.expected_schema = expected_schema
+
+    def check(self, df: DataFrame) -> DataFrame:
+        """
+        Ensure the schema of the DataFrame matches the expected schema.
+        :param df: Input DataFrame.
+        :return: DataFrame with validated schema.
+        """
+        for column, expected_type in self.expected_schema.items():
+            if column not in df.columns:
+                self.handle_violation(f"Column {column} is missing in the DataFrame.")
+            elif df.schema[column].dataType != expected_type:
+                self.handle_violation(f"Data type mismatch for column {column}. Expected {expected_type}, found {df.schema[column].dataType}")
+        return df
