@@ -95,3 +95,67 @@ if __name__ == '__main__':
 
 
 --------------------
+
+
+
+
+from kfp import dsl
+import kfp.components as comp
+
+# Define the training component using create_component_from_func
+@dsl.component
+def train_model_component():
+    import pickle
+    from sklearn.linear_model import LinearRegression
+    import numpy as np
+    import os
+
+    def train_model():
+        X = np.array([[1, 1], [1, 2], [2, 2], [2, 3]])
+        y = np.dot(X, np.array([1, 2])) + 3
+        model = LinearRegression().fit(X, y)
+        filename = 'model.pkl'
+        pickle.dump(model, open(filename, 'wb'))
+        print(f"Model trained and saved to {filename}")
+        return filename
+
+    model_filename = train_model()
+    print(f"Model filename output:{model_filename}")
+    return model_filename
+
+# Define the deployment simulation component
+@dsl.component
+def deployment_component(model_path: str):
+    import pickle
+    import numpy as np
+    import os
+
+    def predict(data):
+        loaded_model = pickle.load(open(model_path, 'rb'))
+        prediction = loaded_model.predict(data)
+        return prediction.tolist()
+
+    if not os.path.exists(model_path):
+        print(f"Error: Model file '{model_path}' not found.")
+        return
+
+    new_data = np.array([[3, 5]])
+    prediction = predict(new_data)
+    print(f"Simulating deployment: Prediction for {new_data}: {prediction}")
+
+# Define the pipeline
+@dsl.pipeline(
+    name='SimpleModelTrainingAndDeployment',
+    description='A simple pipeline to train and "deploy" a model.'
+)
+def simple_pipeline():
+    # Training component
+    train_task = train_model_component()
+
+    # Deployment component (simulated)
+    deploy_task = deployment_component(model_path=train_task.output)
+
+if __name__ == '__main__':
+    from kfp.compiler import compiler
+    compiler.Compiler().compile(simple_pipeline, 'simple_pipeline.yaml')
+    print("Pipeline definition generated: simple_pipeline.yaml")
