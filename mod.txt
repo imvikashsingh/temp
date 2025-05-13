@@ -34,3 +34,26 @@ predictions = loaded_model.predict(X_test)
 
 # Print the predictions
 print("Predictions:", predictions)
+
+
+
+
+
+import pickle
+
+try:
+    with open("model.bst", "rb") as f:
+        loaded_model = pickle.load(f)
+        print("Model loaded successfully!")
+        print(f"Type of loaded object: {type(loaded_model)}")
+        # Now you can try to inspect the 'loaded_model' object.
+        # The structure and contents will depend on how the model was serialized.
+        # For example, if it was a scikit-learn model trained in BigQuery ML,
+        # 'loaded_model' might be a scikit-learn model object.
+        print(f"First few keys/elements (if applicable): {list(loaded_model.__dict__.keys())[:5] if hasattr(loaded_model, '__dict__') else str(loaded_model)[:100]}")
+
+except FileNotFoundError:
+    print(f"Error: The file 'model.bst' was not found.")
+except Exception as e:
+    print(f"An error occurred during unpickling: {e}")
+
