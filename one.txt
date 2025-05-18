@@ -1,0 +1,219 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, pandas_udf, PandasUDFType
+import joblib
+from google.cloud import storage
+import os
+import tempfile
+import pandas as pd
+
+# Initialize Spark session with BigQuery support
+spark = SparkSession.builder \
+    .appName("LargeScaleBQMLPredictions") \
+    .config("spark.jars.packages", "com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.28.0") \
+    .getOrCreate()
+
+# Configuration
+MODEL_BUCKET = "your-model-bucket"
+MODEL_PATH = "path/to/model.bst"
+BQ_PROJECT = "your-project"
+BQ_DATASET = "your_dataset"
+INPUT_TABLE = "input_table"
+OUTPUT_TABLE = "predictions_output"
+
+## Step 1: Load the model from GCS to all workers ##
+
+def load_model_from_gcs():
+    """Downloads and loads the model once per worker"""
+    # Create temp directory
+    temp_dir = tempfile.mkdtemp()
+    local_path = os.path.join(temp_dir, "model.bst")
+    
+    # Download from GCS
+    client = storage.Client()
+    bucket = client.bucket(MODEL_BUCKET)
+    blob = bucket.blob(MODEL_PATH)
+    blob.download_to_filename(local_path)
+    
+    # Load model
+    model = joblib.load(local_path)
+    
+    # Cleanup
+    os.remove(local_path)
+    os.rmdir(temp_dir)
+    
+    return model
+
+# Broadcast the model loading function
+model_broadcast = spark.sparkContext.broadcast(load_model_from_gcs)
+
+## Step 2: Define prediction function ##
+
+@pandas_udf("double", PandasUDFType.SCALAR)
+def predict_udf(*cols):
+    """Pandas UDF for making predictions"""
+    # Get model from broadcast variable
+    model = model_broadcast.value
+    
+    # Combine features into DataFrame
+    features = pd.concat(cols, axis=1)
+    
+    # Make predictions
+    predictions = model.predict(features)
+    return pd.Series(predictions)
+
+## Step 3: Load data from BigQuery ##
+
+input_df = spark.read.format("bigquery") \
+    .option("table", f"{BQ_PROJECT}.{BQ_DATASET}.{INPUT_TABLE}") \
+    .load()
+
+# Cache if dataset will be used multiple times
+input_df.cache()
+
+## Step 4: Prepare features and make predictions ##
+
+# Get feature columns (adjust based on your model's requirements)
+feature_cols = [col("feature1"), col("feature2"), col("feature3")]
+
+# Add predictions to DataFrame
+result_df = input_df.withColumn(
+    "prediction",
+    predict_udf(*feature_cols)
+)
+
+## Step 5: Save results back to BigQuery ##
+
+result_df.write.format("bigquery") \
+    .option("table", f"{BQ_PROJECT}.{BQ_DATASET}.{OUTPUT_TABLE}") \
+    .option("temporaryGcsBucket", "your-temp-bucket") \
+    .mode("overwrite") \
+    .save()
+
+print("Predictions completed and saved to BigQuery")
+
+
+
+-------------------------------------------
+
+
+
+
+``python
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import pandas_udf, PandasUDFType
+from pyspark.sql.types import ArrayType, FloatType
+from pyspark.ml.feature import VectorAssembler
+
+import xgboost as xgb
+import pandas as pd
+
+# Replace with your BigQuery table details
+project_id = "your-project-id"
+dataset_id = "your-dataset-id"
+table_id = "your-table-id"
+bq_table = f"{project_id}.{dataset_id}.{table_id}"
+
+# Replace with your bucket name and model path
+bucket_name = "your-bucket-name"
+model_path = f"gs://{bucket_name}/path/to/your/model.bst"
+
+# Replace with the names of your feature columns
+feature_columns = ["feature1", "feature2", "feature3"]
+
+# Initialize Spark Session with necessary configurations for GCS and BigQuery access
+spark = SparkSession.builder.appName("BigQueryPrediction") \
+    .config("spark.jars.packages", "com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.28.0") \
+    .config("spark.hadoop.google.cloud.auth.type", "SERVICE_ACCOUNT") \
+    .config("spark.hadoop.google.cloud.auth.service.account.enable", "true") \
+    .config("spark.hadoop.fs.gs.auth.service.account.email", "your-service-account-email@your-project.iam.gserviceaccount.com") \
+    .config("spark.hadoop.fs.gs.auth.service.account.private.key", "-----BEGIN PRIVATE KEY-----\\nyour-private-key\\n-----END PRIVATE KEY-----\\n") \
+    .getOrCreate()
+
+try:
+    # Read data from BigQuery
+    input_df = spark.read.format("bigquery").option("table", bq_table).load()
+    input_df.show()
+
+    # Download the model file from GCS to the local filesystem of each worker
+    spark.sparkContext.addFile(model_path)
+    local_model_path = f"file://{spark.sparkFiles.get(model_path.split('/')[-1])}"
+
+    # Define a Pandas UDF for making predictions
+    @pandas_udf(ArrayType(FloatType()), PandasUDFType.SCALAR_ITER)
+    def predict_xgboost(iterator):
+        booster = xgb.Booster(model_file=local_model_path)
+        for pdf in iterator:
+            dmatrix = xgb.DMatrix(pdf[feature_columns])
+            predictions = booster.predict(dmatrix)
+            yield pd.Series(predictions.tolist())
+
+    # Assemble feature columns into a single vector column
+    assembler = VectorAssembler(inputCols=feature_columns, outputCol="features")
+    transformed_df = assembler.transform(input_df)
+
+    # Make predictions using the UDF
+    predictions_df = transformed_df.withColumn("raw_prediction", predict_xgboost(transformed_df))
+
+    # Show the predictions
+    predictions_df.select("features", "raw_prediction").show()
+
+except Exception as e:
+    print(f"An error occurred: {e}")
+
+finally:
+    # Stop Spark Session
+    spark.stop()
+
+
+---------------------------------------------
+
+from pyspark.sql import SparkSession
+from pyspark.ml.feature import VectorAssembler
+from xgboost.spark import SparkXGBClassifierModel
+import pyspark.sql.functions as F
+
+# Initialize Spark session with GCS and BigQuery configurations
+spark = SparkSession.builder \
+    .appName("XGBoostPredictionBigQuery") \
+    .config("spark.hadoop.fs.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
+    .config("spark.hadoop.fs.gs.impl.disable.cache", "true") \
+    .config("spark.hadoop.google.cloud.auth.service.account.enable", "true") \
+    .config("spark.hadoop.google.cloud.auth.service.account.json.keyfile", "/path/to/your-service-account-key.json") \
+    .config("spark.jars", "/path/to/gcs-connector-hadoop3-latest.jar,/path/to/spark-bigquery-latest_2.12.jar") \
+    .config("spark.datasource.bigquery.projectId", "your-gcp-project-id") \
+    .getOrCreate()
+
+# Parameters
+model_path = "gs://your-bucket-name/path/to/model.bst"  # Update with your GCS model path
+bigquery_table = "your-project-id.your_dataset.your_table"  # Update with your BigQuery table
+output_path = "gs://your-bucket-name/path/to/output/predictions"  # Update with output path
+
+# Load data from BigQuery
+input_df = spark.read.format("bigquery") \
+    .option("table", bigquery_table) \
+    .load()
+
+# Prepare features (modify feature_columns based on your data)
+feature_columns = ["feature1", "feature2", "feature3"]  # Replace with actual feature column names
+assembler = VectorAssembler(inputCols=feature_columns, outputCol="features")
+feature_df = assembler.transform(input_df)
+
+# Load the XGBoost model from GCS
+xgb_model = SparkXGBClassifierModel.load(model_path)
+
+# Make predictions
+predictions = xgb_model.transform(feature_df)
+
+# Select relevant columns (modify as needed)
+result_df = predictions.select(
+    "id",  # Replace with your identifier column
+    F.col("prediction").cast("integer").alias("predicted_label"),
+    "probability"
+)
+
+# Save predictions to GCS
+result_df.write.mode("overwrite").parquet(output_path)
+
+# Stop Spark session
+spark.stop()
+-------------------------
