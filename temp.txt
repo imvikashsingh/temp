@@ -1,161 +1,77 @@
-import pickle
-from sklearn.linear_model import LinearRegression
-import numpy as np
+from google.cloud import bigquery
 import os
 
-# Training part
-def train_model():
-    X = np.array([[1, 1], [1, 2], [2, 2], [2, 3]])
-    y = np.dot(X, np.array([1, 2])) + 3
-    model = LinearRegression().fit(X, y)
-    filename = 'model.pkl'
-    pickle.dump(model, open(filename, 'wb'))
-    print(f"Model trained and saved to {filename}")
+# Set your Google Cloud Project ID
+PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT")
 
-# Prediction part (for deployment)
-def predict(data):
-    filename = 'model.pkl'
-    loaded_model = pickle.load(open(filename, 'rb'))
-    prediction = loaded_model.predict(data)
-    return prediction.tolist()
+# Initialize a BigQuery client
+client = bigquery.Client(project=PROJECT_ID)
+
+# Cloud Storage URI of the exported BST model (replace with your actual URI)
+model_uri = "gs://your-bucket-name/your-model-export-path/bst_model"
+
+# BigQuery dataset and model name where you want to load the model
+dataset_id = "your_dataset"
+model_id = "loaded_bst_model"
+model_full_id = f"{PROJECT_ID}.{dataset_id}.{model_id}"
+
+def load_bst_model_from_gcs(model_uri: str, model_full_id: str):
+    """Loads a BST model exported from BigQuery to Cloud Storage into BigQuery ML.
+
+    Args:
+        model_uri: The Cloud Storage URI of the exported BST model.
+        model_full_id: The full BigQuery model ID (e.g., "your-project.your_dataset.your_model").
+    """
+    try:
+        model = bigquery.Model(
+            model_full_id,
+            model_type=bigquery.ModelType.BOOSTED_TREE_CLASSIFIER,
+            model_options={"model_uri": model_uri},
+        )
+
+        load_job = client.create_model(model)
+        load_job.result()  # Wait for the job to complete
+
+        if load_job.state == "DONE":
+            print(f"BST model loaded successfully to: {model_full_id}")
+        else:
+            print(f"Error loading BST model: {load_job.error_result}")
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+def query_data_with_loaded_model(model_full_id: str, table_id: str):
+    """Queries data from BigQuery using the loaded BST model for prediction.
+
+    Args:
+        model_full_id: The full BigQuery model ID.
+        table_id: The full BigQuery table ID containing the data to predict on
+                  (e.g., "your-project.your_dataset.your_table").
+    """
+    try:
+        query = f"""
+            SELECT
+                *,
+                ML.PREDICT(MODEL `{model_full_id}`, (SELECT * FROM `{table_id}`)) AS predicted_label
+            FROM
+                `{table_id}`
+        """
+
+        query_job = client.query(query)
+        results = query_job.result().to_dataframe()
+        print("\nPredictions using the loaded BST model:")
+        print(results.head())
+
+    except Exception as e:
+        print(f"An error occurred during prediction: {e}")
 
 if __name__ == "__main__":
-    train_model()
-    # Example prediction
-    new_data = np.array([[3, 5]])
-    prediction = predict(new_data)
-    print(f"Prediction for {new_data}: {prediction}")
-------------------
+    # Ensure you have the correct Cloud Storage URI for your exported model
+    exported_model_uri = f"{model_uri}/model/export/bst_booster/model.bst" # Adjust path if needed
 
-FROM python:3.9-slim-buster
+    # Load the BST model from Cloud Storage to BigQuery ML
+    load_bst_model_from_gcs(exported_model_uri, model_full_id)
 
-WORKDIR /app
-
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-
-COPY model.py .
-
-CMD ["python", "model.py"]
-
------
-PROJECT_ID="your-gcp-project-id"
-IMAGE_NAME="kubeflow-simple-model"
-IMAGE_TAG="latest"
-IMAGE_URI="gcr.io/${PROJECT_ID}/${IMAGE_NAME}:${IMAGE_TAG}"
-
-docker build -t ${IMAGE_URI} .
-docker push ${IMAGE_URI}
---------
-from kfp import dsl
-import kfp.components as comp
-
-# Load the component definition from the container
-train_op = comp.load_component_from_container(
-    image='gcr.io/your-gcp-project-id/kubeflow-simple-model:latest'
-)
-
-# Define the pipeline
-@dsl.pipeline(
-    name='SimpleModelTrainingAndDeployment',
-    description='A simple pipeline to train and "deploy" a model.'
-)
-def simple_pipeline():
-    # Training component
-    train_task = train_op()
-
-    # Deployment component (simulated)
-    @dsl.component
-    def deployment_component(model_path: str):
-        import pickle
-        import numpy as np
-        import os
-
-        def predict(data):
-            loaded_model = pickle.load(open(model_path, 'rb'))
-            prediction = loaded_model.predict(data)
-            return prediction.tolist()
-
-        # Assuming the model file is in the current working directory
-        model_filename = 'model.pkl'
-        if not os.path.exists(model_filename):
-            print(f"Error: Model file '{model_filename}' not found.")
-            return
-
-        new_data = np.array([[3, 5]])
-        prediction = predict(new_data)
-        print(f"Simulating deployment: Prediction for {new_data}: {prediction}")
-
-    deploy_task = deployment_component(model_path=train_task.outputs['mlpipeline-ui-metadata']) # This won't work directly, see note below
-
-if __name__ == '__main__':
-    from kfp.compiler import compiler
-    compiler.Compiler().compile(simple_pipeline, 'simple_pipeline.yaml')
-    print("Pipeline definition generated: simple_pipeline.yaml")
-
-
---------------------
-
-
-
-
-from kfp import dsl
-import kfp.components as comp
-
-# Define the training component using create_component_from_func
-@dsl.component
-def train_model_component():
-    import pickle
-    from sklearn.linear_model import LinearRegression
-    import numpy as np
-    import os
-
-    def train_model():
-        X = np.array([[1, 1], [1, 2], [2, 2], [2, 3]])
-        y = np.dot(X, np.array([1, 2])) + 3
-        model = LinearRegression().fit(X, y)
-        filename = 'model.pkl'
-        pickle.dump(model, open(filename, 'wb'))
-        print(f"Model trained and saved to {filename}")
-        return filename
-
-    model_filename = train_model()
-    print(f"Model filename output:{model_filename}")
-    return model_filename
-
-# Define the deployment simulation component
-@dsl.component
-def deployment_component(model_path: str):
-    import pickle
-    import numpy as np
-    import os
-
-    def predict(data):
-        loaded_model = pickle.load(open(model_path, 'rb'))
-        prediction = loaded_model.predict(data)
-        return prediction.tolist()
-
-    if not os.path.exists(model_path):
-        print(f"Error: Model file '{model_path}' not found.")
-        return
-
-    new_data = np.array([[3, 5]])
-    prediction = predict(new_data)
-    print(f"Simulating deployment: Prediction for {new_data}: {prediction}")
-
-# Define the pipeline
-@dsl.pipeline(
-    name='SimpleModelTrainingAndDeployment',
-    description='A simple pipeline to train and "deploy" a model.'
-)
-def simple_pipeline():
-    # Training component
-    train_task = train_model_component()
-
-    # Deployment component (simulated)
-    deploy_task = deployment_component(model_path=train_task.output)
-
-if __name__ == '__main__':
-    from kfp.compiler import compiler
-    compiler.Compiler().compile(simple_pipeline, 'simple_pipeline.yaml')
-    print("Pipeline definition generated: simple_pipeline.yaml")
+    # Example: Query a BigQuery table and get predictions using the loaded model
+    source_table_id = f"{PROJECT_ID}.your_dataset.your_prediction_data" # Replace with your table ID
+    query_data_with_loaded_model(model_full_id, source_table_id)
