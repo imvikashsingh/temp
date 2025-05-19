@@ -24,9 +24,7 @@ def load_bst_model_from_gcs(model_uri: str, model_full_id: str):
     """
     try:
         model = bigquery.Model(model_id)
-        model.reference = bigquery.model.ModelReference(model_id)
-        model.reference.project = PROJECT_ID
-        model.reference.dataset_id = dataset_id
+        model.reference = bigquery.model.ModelReference(model_id, dataset_id=dataset_id, project=PROJECT_ID)
         model.model_type = "BOOSTED_TREE_CLASSIFIER"
         model.model_options = {"model_uri": model_uri}
 
