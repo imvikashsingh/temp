@@ -1,42 +1,61 @@
 from google.cloud import bigquery
-import os
+import pandas as pd
 
-# Set your Google Cloud Project ID
-PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT")
+# Initialize BigQuery client
+client = bigquery.Client()
 
-# Initialize a BigQuery client
-client = bigquery.Client(project=PROJECT_ID)
+# Configuration
+project_id = "your-project-id"  # Replace with your GCP project ID
+dataset_id = "your_dataset"    # Replace with your BigQuery dataset
+model_name = "imported_model"  # Name for the imported model in BigQuery
+gcs_model_path = "gs://your-bucket/path/to/model"  # GCS path to exported model
+table_id = f"{project_id}.{dataset_id}.your_table"  # BigQuery table with input data
 
-# Cloud Storage URI of the exported BST model (replace with your actual URI)
-model_uri = "gs://your-bucket-name/your-model-export-path/bst_model"
-
-# BigQuery dataset and model name where you want to load the model
-dataset_id = "your_dataset"
-model_id = "loaded_bst_model"
-model_full_id = f"{PROJECT_ID}.{dataset_id}.{model_id}"
-
-def load_bst_model_from_gcs(model_uri: str, model_full_id: str):
-    """Loads a BST model exported from BigQuery to Cloud Storage into BigQuery ML.
-
-    Args:
-        model_uri: The Cloud Storage URI of the exported BST model.
-        model_full_id: The full BigQuery model ID (e.g., "your-project.your_dataset.your_model").
+def import_model_from_gcs():
+    """Import the exported BQML model from GCS into BigQuery."""
+    import_query = f"""
+    CREATE OR REPLACE MODEL `{project_id}.{dataset_id}.{model_name}`
+    OPTIONS (model_type='BOOSTED_TREE_CLASSIFIER')  -- Adjust model_type as needed
+    AS
+    SELECT * FROM ML.IMPORT_MODEL(
+        MODEL `{project_id}.{dataset_id}.{model_name}`,
+        OPTIONS(input_uri='{gcs_model_path}')
+    )
     """
-    try:
-        model = bigquery.Model(model_id)
-        model.reference = bigquery.model.ModelReference(model_id, dataset_id=dataset_id, project=PROJECT_ID)
-        model.model_type = "BOOSTED_TREE_CLASSIFIER"
-        model.model_options = {"model_uri": model_uri}
+    job = client.query(import_query)
+    job.result()  # Wait for the query to complete
+    print(f"Model {model_name} imported successfully from {gcs_model_path}")
 
-        load_job = client.create_model(model)
-        load_job.result()  # Wait for the job to complete
+def predict_with_model():
+    """Use the imported model to make predictions on data from a BigQuery table."""
+    predict_query = f"""
+    SELECT
+        *
+    FROM
+        ML.PREDICT(
+            MODEL `{project_id}.{dataset_id}.{model_name}`,
+            (SELECT * FROM `{table_id}`)
+        )
+    """
+    query_job = client.query(predict_query)
+    results = query_job.to_dataframe()  # Convert results to a Pandas DataFrame
+    return results
 
-        if load_job.state == "DONE":
-            print(f"BST model loaded successfully to: {model_full_id}")
-        else:
-            print(f"Error loading BST model: {load_job.error_result}")
+def main():
+    # Step 1: Import the model from GCS
+    import_model_from_gcs()
+    
+    # Step 2: Make predictions using the imported model
+    predictions = predict_with_model()
+    
+    # Step 3: Display or process the predictions
+    print("Predictions:")
+    print(predictions.head())
+    
+    # Optionally, save predictions to a new BigQuery table
+    output_table = f"{project_id}.{dataset_id}.predictions"
+    predictions.to_gbq(output_table, project_id=project_id, if_exists='replace')
+    print(f"Predictions saved to {output_table}")
 
-    except Exception as e:
-        print(f"An error occurred: {e}")
-
-# ... (rest of the query_data_with_loaded_model function and main block remain the same)
+if __name__ == "__main__":
+    main()
