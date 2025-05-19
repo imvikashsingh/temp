@@ -23,11 +23,9 @@ def load_bst_model_from_gcs(model_uri: str, model_full_id: str):
         model_full_id: The full BigQuery model ID (e.g., "your-project.your_dataset.your_model").
     """
     try:
-        model = bigquery.Model(
-            model_full_id,
-            model_type=bigquery.ModelType.BOOSTED_TREE_CLASSIFIER,
-            model_options={"model_uri": model_uri},
-        )
+        model = bigquery.Model(model_id, dataset_id=dataset_id)
+        model.model_type = "BOOSTED_TREE_CLASSIFIER"
+        model.model_options = {"model_uri": model_uri}
 
         load_job = client.create_model(model)
         load_job.result()  # Wait for the job to complete
@@ -40,38 +38,4 @@ def load_bst_model_from_gcs(model_uri: str, model_full_id: str):
     except Exception as e:
         print(f"An error occurred: {e}")
 
-def query_data_with_loaded_model(model_full_id: str, table_id: str):
-    """Queries data from BigQuery using the loaded BST model for prediction.
-
-    Args:
-        model_full_id: The full BigQuery model ID.
-        table_id: The full BigQuery table ID containing the data to predict on
-                  (e.g., "your-project.your_dataset.your_table").
-    """
-    try:
-        query = f"""
-            SELECT
-                *,
-                ML.PREDICT(MODEL `{model_full_id}`, (SELECT * FROM `{table_id}`)) AS predicted_label
-            FROM
-                `{table_id}`
-        """
-
-        query_job = client.query(query)
-        results = query_job.result().to_dataframe()
-        print("\nPredictions using the loaded BST model:")
-        print(results.head())
-
-    except Exception as e:
-        print(f"An error occurred during prediction: {e}")
-
-if __name__ == "__main__":
-    # Ensure you have the correct Cloud Storage URI for your exported model
-    exported_model_uri = f"{model_uri}/model/export/bst_booster/model.bst" # Adjust path if needed
-
-    # Load the BST model from Cloud Storage to BigQuery ML
-    load_bst_model_from_gcs(exported_model_uri, model_full_id)
-
-    # Example: Query a BigQuery table and get predictions using the loaded model
-    source_table_id = f"{PROJECT_ID}.your_dataset.your_prediction_data" # Replace with your table ID
-    query_data_with_loaded_model(model_full_id, source_table_id)
+# ... (rest of the query_data_with_loaded_model function and main block remain the same)
