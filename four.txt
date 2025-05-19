@@ -1,0 +1,80 @@
+from google.cloud import bigquery
+import os
+
+# Set your Google Cloud Project ID
+PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT")
+
+# Initialize a BigQuery client
+client = bigquery.Client(project=PROJECT_ID)
+
+# Cloud Storage URI of the exported BST model (replace with your actual URI)
+model_uri = "gs://your-bucket-name/your-model-export-path/bst_model"
+
+# BigQuery dataset and model name where you want to load the model
+dataset_id = "your_dataset"
+model_id = "loaded_bst_model"
+model_full_id = f"{PROJECT_ID}.{dataset_id}.{model_id}"
+
+def load_bst_model_from_gcs(model_uri: str, model_full_id: str):
+    """Loads a BST model exported from BigQuery to Cloud Storage into BigQuery ML.
+
+    Args:
+        model_uri: The Cloud Storage URI of the exported BST model.
+        model_full_id: The full BigQuery model ID (e.g., "your-project.your_dataset.your_model").
+    """
+    try:
+        job_config = bigquery.LoadModelJobConfig(
+            model_type=bigquery.ModelType.BOOSTED_TREE_CLASSIFIER,
+            model_options={"model_uri": model_uri},
+        )
+
+        load_job = client.create_model(
+            model_full_id,
+            job_config=job_config,
+        )
+
+        load_job.result()  # Wait for the job to complete
+
+        if load_job.state == "DONE":
+            print(f"BST model loaded successfully to: {model_full_id}")
+        else:
+            print(f"Error loading BST model: {load_job.error_result}")
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+def query_data_with_loaded_model(model_full_id: str, table_id: str):
+    """Queries data from BigQuery using the loaded BST model for prediction.
+
+    Args:
+        model_full_id: The full BigQuery model ID.
+        table_id: The full BigQuery table ID containing the data to predict on
+                  (e.g., "your-project.your_dataset.your_table").
+    """
+    try:
+        query = f"""
+            SELECT
+                *,
+                ML.PREDICT(MODEL `{model_full_id}`, (SELECT * FROM `{table_id}`)) AS predicted_label
+            FROM
+                `{table_id}`
+        """
+
+        query_job = client.query(query)
+        results = query_job.result().to_dataframe()
+        print("\nPredictions using the loaded BST model:")
+        print(results.head())
+
+    except Exception as e:
+        print(f"An error occurred during prediction: {e}")
+
+if __name__ == "__main__":
+    # Ensure you have the correct Cloud Storage URI for your exported model
+    exported_model_uri = f"{model_uri}/model/export/bst_booster/model.bst" # Adjust path if needed
+
+    # Load the BST model from Cloud Storage to BigQuery ML
+    load_bst_model_from_gcs(exported_model_uri, model_full_id)
+
+    # Example: Query a BigQuery table and get predictions using the loaded model
+    source_table_id = f"{PROJECT_ID}.your_dataset.your_prediction_data" # Replace with your table ID
+    query_data_with_loaded_model(model_full_id, source_table_id)
