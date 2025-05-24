@@ -1,0 +1,34 @@
+CREATE OR REPLACE MODEL
+  `your_project_id.your_dataset.your_model_name`
+OPTIONS(
+  MODEL_TYPE = 'XGBOOST',
+  MODEL_PATH = 'gs://your-bucket-name/path/to/your_model.bst',
+  INPUT_OUTPUT_COLS = [
+    STRUCT(
+      'feature_1' AS name,
+      'FLOAT64' AS type
+    ),
+    STRUCT(
+      'feature_2' AS name,
+      'INT64' AS type
+    )
+    -- Add all your input features here with their correct BigQuery data types
+  ],
+  OUTPUT_COLUMN = 'predicted_label' -- Replace with the actual name of your model's output column
+);
+
+
+
+------------
+
+CREATE OR REPLACE MODEL
+  `your_project_id.customer_data.churn_prediction_xgboost_model`
+OPTIONS(
+  MODEL_TYPE = 'XGBOOST',
+  MODEL_PATH = 'gs://my-bqml-models-2025/customer_churn_model.bst', -- YOUR BUCKET URI HERE!
+  INPUT_OUTPUT_COLS = [
+    STRUCT('account_age_days' AS name, 'INT64' AS type), -- Our model takes INT64
+    STRUCT('monthly_bill_usd' AS name, 'FLOAT64' AS type) -- Our model takes FLOAT64
+  ],
+  OUTPUT_COLUMN = 'predicted_churn_probability' -- This is the name for the output column
+);
