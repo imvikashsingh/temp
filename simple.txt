@@ -1,137 +1,147 @@
-import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Date, Boolean
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+# pipeline.py
+import kfp
+from kfp.v2 import compiler
+from kfp.v2.dsl import pipeline, component, Condition
 
-# Database configuration - adjust for your DB
-DATABASE_URI = "sqlite:///etl_tracker.db"  # Example for SQLite
-# For PostgreSQL: "postgresql://user:password@localhost/dbname"
-# For MySQL: "mysql+pymysql://user:password@localhost/dbname"
+# --- Configuration ---
+PROJECT_ID = "your-gcp-project-id"  # <<< REPLACE WITH YOUR GCP PROJECT ID
+REGION = "your-gcp-region"          # <<< REPLACE WITH YOUR GCP REGION, e.g., "us-central1", "europe-west1"
+PIPELINE_ROOT = f"gs://your-gcs-bucket-for-artifacts/{kfp.dsl.PIPELINE_JOB_ID}" # <<< REPLACE WITH YOUR GCS BUCKET
 
-Base = declarative_base()
+# BigQuery details - make sure this dataset exists in your project
+BQ_DATASET_ID = "fraud_detection_dataset"
+RAW_TRANSACTIONS_TABLE = "raw_transactions"
+PROCESSED_TRANSACTIONS_TABLE = "processed_transactions"
 
-class ETLAudit(Base):
-    """Database model for tracking ETL executions"""
-    __tablename__ = 'etl_audit'
-    
-    id = Column(Integer, primary_key=True)
-    run_date = Column(Date, nullable=False)
-    run_type = Column(String(10), nullable=False)  # 'daily' or 'monthly'
-    success = Column(Boolean, nullable=False)
-    timestamp = Column(String(20), nullable=False)
-    month_year = Column(String(7), nullable=False)  # Format 'YYYY-MM'
+# Docker image paths (ensure these match what you pushed to GCR/Artifact Registry)
+ETL_IMAGE = f"gcr.io/{PROJECT_ID}/fraud-etl:latest"
+MODEL_TRAINING_IMAGE = f"gcr.io/{PROJECT_ID}/fraud-model-training:latest" # Consolidated image
 
-# Database setup
-engine = create_engine(DATABASE_URI)
-Session = sessionmaker(bind=engine)
-Base.metadata.create_all(engine)
+# Define a list of models to train. Each dictionary represents one model.
+# Adding a new model is as simple as adding a new dictionary to this list.
+MODELS_TO_TRAIN = [
+    {"name": "fraud_model_a_logistic_reg", "type": "LOGISTIC_REG"},
+    {"name": "fraud_model_b_boosted_tree", "type": "BOOSTED_TREE_CLASSIFIER"},
+    {"name": "fraud_model_c_dnn_classifier", "type": "DNN_CLASSIFIER"},
+    # Add more models here:
+    # {"name": "fraud_model_d_kmeans_clustering", "type": "KMEANS"}, # Example for KMEANS
+]
 
-class ETLAuditDB:
-    """Handles database operations for ETL tracking"""
-    def __init__(self):
-        self.session = Session()
-        
-    def log_execution(self, run_date, run_type, success):
-        """Log an ETL execution to database"""
-        record = ETLAudit(
-            run_date=run_date,
-            run_type=run_type,
-            success=success,
-            timestamp=datetime.datetime.now().isoformat(),
-            month_year=run_date.strftime("%Y-%m")
+# --- Define Custom Kubeflow Components ---
+
+@component(
+    base_image=ETL_IMAGE,
+    output_component_file="etl_component.yaml",
+)
+def etl_step(
+    project_id: str,
+    dataset_id: str,
+    source_table: str,
+    processed_table: str,
+):
+    """
+    Kubeflow component for running the ETL process.
+    """
+    import os
+    os.system(
+        f"python fraud/etl/data_preparation.py "
+        f"--project_id={project_id} "
+        f"--dataset_id={dataset_id} "
+        f"--source_table={source_table} "
+        f"--processed_table={processed_table}"
+    )
+
+@component(
+    base_image=MODEL_TRAINING_IMAGE,
+    output_component_file="model_training_component.yaml",
+)
+def train_model_step(
+    project_id: str,
+    dataset_id: str,
+    processed_table: str,
+    model_name: str,
+    model_type: str,
+):
+    """
+    Kubeflow component for training a BigQuery ML model with a specified type.
+    """
+    import os
+    os.system(
+        f"python fraud/models/model_training.py "
+        f"--project_id={project_id} "
+        f"--dataset_id={dataset_id} "
+        f"--processed_table={processed_table} "
+        f"--model_name={model_name} "
+        f"--model_type={model_type}"
+    )
+
+# Optional: A final component to indicate pipeline completion
+@component
+def final_pipeline_step():
+    print("All models trained successfully!")
+
+# --- Define the Kubeflow Pipeline DAG ---
+
+@pipeline(
+    name="fraud-detection-bigqueryml-matured-parallel-pipeline",
+    description="A multi-model fraud detection pipeline with dynamic parallel BigQuery ML training.",
+    pipeline_root=PIPELINE_ROOT,
+)
+def fraud_detection_pipeline(
+    project_id: str = PROJECT_ID,
+    region: str = REGION,
+    bq_dataset_id: str = BQ_DATASET_ID,
+    raw_transactions_table: str = RAW_TRANSACTIONS_TABLE,
+    processed_transactions_table: str = PROCESSED_TRANSACTIONS_TABLE,
+):
+    # Step 1: ETL for data preparation
+    etl_task = etl_step(
+        project_id=project_id,
+        dataset_id=bq_dataset_id,
+        source_table=raw_transactions_table,
+        processed_table=processed_transactions_table,
+    )
+
+    # Step 2: Parallel Model Training using with_items
+    # This loop dynamically creates a parallel task for each item in MODELS_TO_TRAIN.
+    # Each task will run independently and concurrently after the ETL step.
+    with kfp.dsl.ParallelFor(MODELS_TO_TRAIN) as model_item:
+        train_task = train_model_step(
+            project_id=project_id,
+            dataset_id=bq_dataset_id,
+            processed_table=processed_transactions_table,
+            model_name=model_item["name"], # Access dict keys for parameters
+            model_type=model_item["type"],
         )
-        self.session.add(record)
-        self.session.commit()
-        
-    def validate_previous_month(self):
-        """Check if all days in previous month had successful daily ETL runs"""
-        today = datetime.date.today()
-        first_of_month = today.replace(day=1)
-        prev_month = first_of_month - datetime.timedelta(days=1)
-        
-        # Get all dates in previous month
-        days_in_prev_month = (first_of_month - datetime.timedelta(days=1)).day
-        all_dates = [
-            datetime.date(prev_month.year, prev_month.month, day) 
-            for day in range(1, days_in_prev_month + 1)
-        ]
-        
-        # Get successful executions from database
-        month_str = prev_month.strftime("%Y-%m")
-        executions = self.session.query(ETLAudit.run_date).filter(
-            ETLAudit.month_year == month_str,
-            ETLAudit.run_type == 'daily',
-            ETLAudit.success == True
-        ).all()
-        
-        executed_dates = {e.run_date for e in executions}
-        return all(date in executed_dates for date in all_dates)
-        
-    def monthly_extract_ran(self, month_year):
-        """Check if monthly extract already ran for given month"""
-        return self.session.query(ETLAudit).filter(
-            ETLAudit.month_year == month_year,
-            ETLAudit.run_type == 'monthly'
-        ).first() is not None
-        
-    def close(self):
-        self.session.close()
+        train_task.after(etl_task) # Each parallel task depends on the ETL step
 
-# Your existing ETL functions
-def daily_extract():
-    print("Running daily extract...")
-    # Your existing extract logic
-    return True
+    # Step 3: Final step that waits for ALL parallel training tasks to complete
+    # The `final_pipeline_step` will automatically wait for all tasks in the
+    # `ParallelFor` loop that it directly depends on to finish.
+    # No need for individual `.after()` calls for each dynamic task.
+    final_pipeline_step_task = final_pipeline_step()
+    final_pipeline_step_task.after(train_task) # 'train_task' here refers to the *last* task created in the loop,
+                                               # but when used with ParallelFor, it correctly implies waiting for all.
 
-def daily_transform():
-    print("Running daily transform...")
-    # Your existing transform logic
-    return True
 
-def daily_load():
-    print("Running daily load...")
-    # Your existing load logic
-    return True
-
-# New monthly extraction
-def monthly_extract():
-    print("Running monthly extract...")
-    # Your monthly extraction logic
-    return True
-
-def run_daily_etl():
-    """Execute daily ETL pipeline with database tracking"""
-    db = ETLAuditDB()
-    today = datetime.date.today()
-    prev_month = (today.replace(day=1) - datetime.timedelta(days=1)).strftime("%Y-%m")
-    
-    try:
-        # Run daily ETL
-        success = (
-            daily_extract() and 
-            daily_transform() and 
-            daily_load()
-        )
-        
-        # Log execution to database
-        db.log_execution(today, 'daily', success)
-        
-        # Check if we should run monthly extract (on 1st of month)
-        if today.day == 1 and not db.monthly_extract_ran(prev_month):
-            if db.validate_previous_month():
-                monthly_success = monthly_extract()
-                db.log_execution(today, 'monthly', monthly_success)
-            else:
-                print("Skipping monthly extract - not all daily ETLs completed last month")
-                
-        return success
-        
-    except Exception as e:
-        db.log_execution(today, 'daily', False)
-        print(f"ETL failed: {str(e)}")
-        return False
-    finally:
-        db.close()
-
+# --- Pipeline Compilation and Submission ---
 if __name__ == "__main__":
-    run_daily_etl()
+    compiler.Compiler().compile(
+        pipeline_func=fraud_detection_pipeline,
+        package_path="fraud_detection_pipeline.json",
+    )
+    print("Pipeline compiled to fraud_detection_pipeline.json")
+
+    # Optional: Submit the pipeline job directly from here (for testing/development)
+    # from google.cloud import aiplatform
+
+    # aiplatform.init(project=PROJECT_ID, location=REGION)
+
+    # job = aiplatform.PipelineJob(
+    #     display_name="fraud-bqml-matured-parallel-run",
+    #     template_path="fraud_detection_pipeline.json",
+    #     pipeline_root=PIPELINE_ROOT,
+    #     enable_caching=True,
+    # )
+    # job.run()
+    # print(f"Pipeline job submitted. View at: {job.console_uri}")
