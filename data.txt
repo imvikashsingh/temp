@@ -1,43 +1,12 @@
-import pandas as pd
-import numpy as np
-import random
+# From pipelines/run_pipeline.py
 
-# Set random seed for reproducibility
-np.random.seed(42)
-
-# Generate 100 records
-def generate_test_data():
-    # Base data
-    data = {
-        "id": list(range(100)),  # Start with sequential IDs
-        "name": [random.choice(["Alice", "Bob", "Charlie", "David", "Eve", None]) for _ in range(100)],
-        "value": [random.uniform(0, 2000) for _ in range(100)]
-    }
-    
-    # Convert to DataFrame
-    df = pd.DataFrame(data)
-    
-    # Introduce nulls (hard rule violation)
-    df.loc[df.index % 10 == 0, "id"] = np.nan  # Null ID every 10th record (10 records)
-    df.loc[df.index % 15 == 0, "value"] = np.nan  # Null value every 15th record (7 records)
-    
-    # Introduce duplicates (soft rule violation)
-    df.loc[50, "id"] = 5  # Duplicate ID 5
-    df.loc[60, "id"] = 15  # Duplicate ID 15
-    df.loc[70, "id"] = 25  # Duplicate ID 25
-    
-    return df
-
-# Generate data
-test_df = generate_test_data()
-
-# Save to CSV
-output_path = "test_data_pandas.csv"
-test_df.to_csv(output_path, index=False)
-
-# Display sample and stats for verification
-print("Sample of first 10 records:")
-print(test_df.head(10))
-print("\nTotal records:", len(test_df))
-print("Null counts:\n", test_df.isnull().sum())
-print("Duplicate ID count:", test_df.duplicated(subset=["id"]).sum())
+@dsl.container_component
+def training_op(project_id: str, source_table_id: str, model_type: str, model_id: dsl.OutputPath(str)):
+    return dsl.ContainerSpec(
+        image=IMAGE_URI,
+        command=[
+            "python", "-m", "fraud.entrypoints.training",
+            # ... arguments ...
+        ]
+        # No cpu_limit, memory_limit, or accelerator settings are needed here.
+    )
