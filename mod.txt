@@ -1,59 +1,178 @@
-from sklearn.datasets import load_iris
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-import joblib
+# fraud/training.py
+from google.cloud import bigquery
+import logging
 
-# Load dataset
-data = load_iris()
-X = data.data
-y = data.target
+logging.basicConfig(level=logging.INFO)
 
-# Split the dataset into training and testing sets
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+def run(project_id: str, source_table_id: str, model_type: str) -> str:
+    """
+    Trains a BQML model and returns its full ID.
 
-# Create a model (Random Forest Classifier in this case)
-model = RandomForestClassifier(n_estimators=100, random_state=42)
+    Args:
+        project_id (str): The GCP project ID.
+        source_table_id (str): Full ID of the processed training data table.
+        model_type (str): The type of BQML model to train (e.g., 'LOGISTIC_REG', 'BOOSTED_TREE_CLASSIFIER').
 
-# Train the model
-model.fit(X_train, y_train)
+    Returns:
+        str: The full ID of the trained model.
+    """
+    client = bigquery.Client(project=project_id)
+    dataset_id = source_table_id.split('.')[1]
+    model_id = f"{project_id}.{dataset_id}.fraud_model_{model_type}"
 
-# Save the model to a file using joblib
-joblib.dump(model, 'iris_model.joblib')
+    logging.info(f"Starting training for model {model_id} from table {source_table_id}")
+    
+    sql = f"""
+    CREATE OR REPLACE MODEL `{model_id}`
+    OPTIONS(
+        MODEL_TYPE='{model_type}',
+        INPUT_LABEL_COLS=['Class'],
+        AUTO_CLASS_WEIGHTS=TRUE
+    ) AS
+    SELECT
+      *
+    FROM
+      `{source_table_id}`
+    """
 
-print("Model saved to iris_model.joblib")
+    job = client.query(sql)
+    job.result() # Wait for training to complete
+
+    logging.info(f"Training completed. Model created: {model_id}")
+    
+    return model_id
 
 
+    -------------------------------------------------------------------------------
+    # pipelines/entrypoints/training_main.py
+import argparse
+from fraud import training
+from kfp.dsl import OutputPath
 
-import joblib
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--project-id', type=str, required=True)
+    parser.add_argument('--source-table-id', type=str, required=True)
+    parser.add_argument('--model-type', type=str, required=True)
+    parser.add_argument('--model-id-path', type=OutputPath(str))
+    args = parser.parse_args()
 
-# Load the model from the file
-loaded_model = joblib.load('iris_model.joblib')
+    model_id = training.run(
+        project_id=args.project_id,
+        source_table_id=args.source_table_id,
+        model_type=args.model_type
+    )
 
-# Use the loaded model to make predictions
-predictions = loaded_model.predict(X_test)
+    with open(args.model_id_path, 'w') as f:
+        f.write(model_id)
+  -----------------------------------------------------------------------------
 
-# Print the predictions
-print("Predictions:", predictions)
+  # pipelines/run_pipeline.py
+import kfp
+from kfp import dsl
+from kfp.compiler import Compiler
+
+# --- Pipeline Configuration ---
+# TODO: Update these with your specific details
+PROJECT_ID = "your-gcp-project-id"
+PIPELINE_ROOT = "gs://your-pipeline-root-bucket/fraud-pipeline"
+REGION = "europe-west4" # The region for Vertex AI and Artifact Registry
+REPO_NAME = "ml-pipelines-repo" # Your Artifact Registry repo name
+IMAGE_NAME = "fraud-pipeline"
+IMAGE_TAG = "latest"
+
+# The full URI for your container image
+IMAGE_URI = f"{REGION}-docker.pkg.dev/{PROJECT_ID}/{REPO_NAME}/{IMAGE_NAME}:{IMAGE_TAG}"
+
+# --- Data and Model Configuration ---
+# Using a public dataset for this example
+SOURCE_TABLE = "bigquery-public-data.ml_datasets.ulb_fraud_detection"
+# BQML model types to train in parallel
+MODEL_TYPES_TO_TRAIN = ['LOGISTIC_REG', 'BOOSTED_TREE_CLASSIFIER']
+# Model to use for the final prediction step
+MODEL_FOR_PREDICTION = 'BOOSTED_TREE_CLASSIFIER'
 
 
+# --- Component Definitions ---
+@dsl.container_component
+def etl_op(project_id: str, source_table: str, processed_table_id: dsl.OutputPath(str)):
+    return dsl.ContainerSpec(
+        image=IMAGE_URI,
+        command=[
+            "python", "/app/pipelines/entrypoints/etl_main.py",
+            "--project-id", project_id,
+            "--source-table", source_table,
+            "--processed-table-id-path", processed_table_id,
+        ]
+    )
+
+@dsl.container_component
+def training_op(project_id: str, source_table_id: str, model_type: str, model_id: dsl.OutputPath(str)):
+    return dsl.ContainerSpec(
+        image=IMAGE_URI,
+        command=[
+            "python", "/app/pipelines/entrypoints/training_main.py",
+            "--project-id", project_id,
+            "--source-table-id", source_table_id,
+            "--model-type", model_type,
+            "--model-id-path", model_id,
+        ]
+    )
+
+@dsl.container_component
+def prediction_op(project_id: str, source_table_id: str, model_id: str, predictions_table_id: dsl.OutputPath(str)):
+    return dsl.ContainerSpec(
+        image=IMAGE_URI,
+        command=[
+            "python", "/app/pipelines/entrypoints/prediction_main.py",
+            "--project-id", project_id,
+            "--source-table-id", source_table_id,
+            "--model-id", model_id,
+            "--predictions-table-id-path", predictions_table_id,
+        ]
+    )
+
+# --- Pipeline Definition ---
+@dsl.pipeline(
+    name="bqml-fraud-detection-pipeline",
+    description="A pipeline for ETL, parallel BQML training, and prediction.",
+    pipeline_root=PIPELINE_ROOT,
+)
+def fraud_pipeline(
+    project_id: str = PROJECT_ID,
+    source_table: str = SOURCE_TABLE,
+    model_types: list = MODEL_TYPES_TO_TRAIN,
+    prediction_model_type: str = MODEL_FOR_PREDICTION,
+):
+    # 1. Common ETL step
+    etl_task = etl_op(project_id=project_id, source_table=source_table)
+
+    # 2. Parallel training loop
+    with dsl.ParallelFor(items=model_types, name="parallel-training") as model_type:
+        training_task = training_op(
+            project_id=project_id,
+            source_table_id=etl_task.outputs["processed_table_id"],
+            model_type=model_type,
+        )
+
+    # 3. Prediction Step (after parallel training finishes)
+    # This step runs after the entire ParallelFor block is complete.
+    # Note: We construct the model_id based on a known naming convention.
+    # A more advanced pipeline might have a 'model selection' step here.
+    dataset_id = source_table.split('.')[1]
+    prediction_model_id = f"{project_id}.{dataset_id}.fraud_model_{prediction_model_type}"
+    
+    prediction_task = prediction_op(
+        project_id=project_id,
+        source_table_id=etl_task.outputs["processed_table_id"],
+        model_id=prediction_model_id,
+    ).after(training_task)
 
 
-
-import pickle
-
-try:
-    with open("model.bst", "rb") as f:
-        loaded_model = pickle.load(f)
-        print("Model loaded successfully!")
-        print(f"Type of loaded object: {type(loaded_model)}")
-        # Now you can try to inspect the 'loaded_model' object.
-        # The structure and contents will depend on how the model was serialized.
-        # For example, if it was a scikit-learn model trained in BigQuery ML,
-        # 'loaded_model' might be a scikit-learn model object.
-        print(f"First few keys/elements (if applicable): {list(loaded_model.__dict__.keys())[:5] if hasattr(loaded_model, '__dict__') else str(loaded_model)[:100]}")
-
-except FileNotFoundError:
-    print(f"Error: The file 'model.bst' was not found.")
-except Exception as e:
-    print(f"An error occurred during unpickling: {e}")
-
+if __name__ == "__main__":
+    Compiler().compile(
+        pipeline_func=fraud_pipeline,
+        package_path="fraud_pipeline.json",
+    )
+    print("✅ Pipeline compiled successfully to fraud_pipeline.json")
+    -------------------------------------------------------------------
