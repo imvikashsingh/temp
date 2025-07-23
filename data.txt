@@ -1,4 +1,33 @@
-# From pipelines/run_pipeline.py
+# pipelines/run_pipeline.py
+from kfp import dsl
+from kfp.compiler import Compiler
+
+# --- Pipeline Configuration ---
+PROJECT_ID = "your-gcp-project-id"
+PIPELINE_ROOT = "gs://your-pipeline-root-bucket/fraud-pipeline"
+REGION = "europe-west4"
+REPO_NAME = "ml-pipelines-repo"
+IMAGE_NAME = "fraud-pipeline"
+IMAGE_TAG = "latest"
+IMAGE_URI = f"{REGION}-docker.pkg.dev/{PROJECT_ID}/{REPO_NAME}/{IMAGE_NAME}:{IMAGE_TAG}"
+
+# --- Data and Model Configuration ---
+SOURCE_TABLE = "bigquery-public-data.ml_datasets.ulb_fraud_detection"
+MODEL_TYPES_TO_TRAIN = ['LOGISTIC_REG', 'BOOSTED_TREE_CLASSIFIER']
+MODEL_FOR_PREDICTION = 'BOOSTED_TREE_CLASSIFIER'
+
+# --- Component Definitions ---
+@dsl.container_component
+def etl_op(project_id: str, source_table: str, processed_table_id: dsl.OutputPath(str)):
+    return dsl.ContainerSpec(
+        image=IMAGE_URI,
+        command=[
+            "python", "-m", "fraud.entrypoints.etl",
+            "--project-id", project_id,
+            "--source-table", source_table,
+            "--processed-table-id-path", processed_table_id,
+        ]
+    )
 
 @dsl.container_component
 def training_op(project_id: str, source_table_id: str, model_type: str, model_id: dsl.OutputPath(str)):
@@ -6,7 +35,59 @@ def training_op(project_id: str, source_table_id: str, model_type: str, model_id
         image=IMAGE_URI,
         command=[
             "python", "-m", "fraud.entrypoints.training",
-            # ... arguments ...
+            "--project-id", project_id,
+            "--source-table-id", source_table_id,
+            "--model-type", model_type,
+            "--model-id-path", model_id,
         ]
-        # No cpu_limit, memory_limit, or accelerator settings are needed here.
     )
+
+@dsl.container_component
+def prediction_op(project_id: str, source_table_id: str, model_id: str, predictions_table_id: dsl.OutputPath(str)):
+    return dsl.ContainerSpec(
+        image=IMAGE_URI,
+        command=[
+            "python", "-m", "fraud.entrypoints.prediction",
+            "--project-id", project_id,
+            "--source-table-id", source_table_id,
+            "--model-id", model_id,
+            "--predictions-table-id-path", predictions_table_id,
+        ]
+    )
+
+# --- Pipeline Definition ---
+@dsl.pipeline(
+    name="bqml-fraud-detection-pipeline-v2",
+    description="A pipeline with entrypoints inside the main package.",
+    pipeline_root=PIPELINE_ROOT,
+)
+def fraud_pipeline(
+    project_id: str = PROJECT_ID,
+    source_table: str = SOURCE_TABLE,
+    model_types: list = MODEL_TYPES_TO_TRAIN,
+    prediction_model_type: str = MODEL_FOR_PREDICTION,
+):
+    etl_task = etl_op(project_id=project_id, source_table=source_table)
+
+    with dsl.ParallelFor(items=model_types, name="parallel-training") as model_type:
+        training_task = training_op(
+            project_id=project_id,
+            source_table_id=etl_task.outputs["processed_table_id"],
+            model_type=model_type,
+        )
+
+    dataset_id = source_table.split('.')[1]
+    prediction_model_id = f"{project_id}.{dataset_id}.fraud_model_{prediction_model_type}"
+    
+    prediction_task = prediction_op(
+        project_id=project_id,
+        source_table_id=etl_task.outputs["processed_table_id"],
+        model_id=prediction_model_id,
+    ).after(training_task)
+
+if __name__ == "__main__":
+    Compiler().compile(
+        pipeline_func=fraud_pipeline,
+        package_path="fraud_pipeline_v2.json",
+    )
+    print("✅ Pipeline compiled successfully to fraud_pipeline_v2.json")
