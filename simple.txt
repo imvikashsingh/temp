@@ -1,147 +1,70 @@
-# pipeline.py
-import kfp
-from kfp.v2 import compiler
-from kfp.v2.dsl import pipeline, component, Condition
+# Use Debian 12 as the base image for compatibility with Vertex AI
+FROM debian:12-slim
 
-# --- Configuration ---
-PROJECT_ID = "your-gcp-project-id"  # <<< REPLACE WITH YOUR GCP PROJECT ID
-REGION = "your-gcp-region"          # <<< REPLACE WITH YOUR GCP REGION, e.g., "us-central1", "europe-west1"
-PIPELINE_ROOT = f"gs://your-gcs-bucket-for-artifacts/{kfp.dsl.PIPELINE_JOB_ID}" # <<< REPLACE WITH YOUR GCS BUCKET
+# Suppress interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
 
-# BigQuery details - make sure this dataset exists in your project
-BQ_DATASET_ID = "fraud_detection_dataset"
-RAW_TRANSACTIONS_TABLE = "raw_transactions"
-PROCESSED_TRANSACTIONS_TABLE = "processed_transactions"
+# Install utilities required by Spark and Python
+RUN apt-get update && apt-get install -y \
+    procps \
+    tini \
+    libjemalloc2 \
+    wget \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# Docker image paths (ensure these match what you pushed to GCR/Artifact Registry)
-ETL_IMAGE = f"gcr.io/{PROJECT_ID}/fraud-etl:latest"
-MODEL_TRAINING_IMAGE = f"gcr.io/{PROJECT_ID}/fraud-model-training:latest" # Consolidated image
+# Install OpenJDK 11 (compatible with PySpark 3.5)
+RUN apt-get update && apt-get install -y openjdk-11-jdk \
+    && rm -rf /var/lib/apt/lists/*
 
-# Define a list of models to train. Each dictionary represents one model.
-# Adding a new model is as simple as adding a new dictionary to this list.
-MODELS_TO_TRAIN = [
-    {"name": "fraud_model_a_logistic_reg", "type": "LOGISTIC_REG"},
-    {"name": "fraud_model_b_boosted_tree", "type": "BOOSTED_TREE_CLASSIFIER"},
-    {"name": "fraud_model_c_dnn_classifier", "type": "DNN_CLASSIFIER"},
-    # Add more models here:
-    # {"name": "fraud_model_d_kmeans_clustering", "type": "KMEANS"}, # Example for KMEANS
-]
+# Set JAVA_HOME environment variable
+ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+ENV PATH=$JAVA_HOME/bin:$PATH
 
-# --- Define Custom Kubeflow Components ---
+# Install Python 3.11
+RUN apt-get update && apt-get install -y \
+    python3.11 \
+    python3.11-venv \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
 
-@component(
-    base_image=ETL_IMAGE,
-    output_component_file="etl_component.yaml",
-)
-def etl_step(
-    project_id: str,
-    dataset_id: str,
-    source_table: str,
-    processed_table: str,
-):
-    """
-    Kubeflow component for running the ETL process.
-    """
-    import os
-    os.system(
-        f"python fraud/etl/data_preparation.py "
-        f"--project_id={project_id} "
-        f"--dataset_id={dataset_id} "
-        f"--source_table={source_table} "
-        f"--processed_table={processed_table}"
-    )
+# Set Python 3.11 as the default python3
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
 
-@component(
-    base_image=MODEL_TRAINING_IMAGE,
-    output_component_file="model_training_component.yaml",
-)
-def train_model_step(
-    project_id: str,
-    dataset_id: str,
-    processed_table: str,
-    model_name: str,
-    model_type: str,
-):
-    """
-    Kubeflow component for training a BigQuery ML model with a specified type.
-    """
-    import os
-    os.system(
-        f"python fraud/models/model_training.py "
-        f"--project_id={project_id} "
-        f"--dataset_id={dataset_id} "
-        f"--processed_table={processed_table} "
-        f"--model_name={model_name} "
-        f"--model_type={model_type}"
-    )
+# Create a virtual environment for Python dependencies
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
-# Optional: A final component to indicate pipeline completion
-@component
-def final_pipeline_step():
-    print("All models trained successfully!")
+# Copy and install requirements from requirements.txt
+COPY requirements.txt /opt/spark/work-dir/requirements.txt
+# Install dependencies, excluding pyspark to avoid conflicts with Vertex AI's runtime
+RUN pip install --no-cache-dir -r /opt/spark/work-dir/requirements.txt --no-deps || \
+    pip install --no-cache-dir $(grep -v '^pyspark' /opt/spark/work-dir/requirements.txt)
 
-# --- Define the Kubeflow Pipeline DAG ---
+# Copy the fraud package
+COPY fraud /opt/spark/work-dir/fraud
 
-@pipeline(
-    name="fraud-detection-bigqueryml-matured-parallel-pipeline",
-    description="A multi-model fraud detection pipeline with dynamic parallel BigQuery ML training.",
-    pipeline_root=PIPELINE_ROOT,
-)
-def fraud_detection_pipeline(
-    project_id: str = PROJECT_ID,
-    region: str = REGION,
-    bq_dataset_id: str = BQ_DATASET_ID,
-    raw_transactions_table: str = RAW_TRANSACTIONS_TABLE,
-    processed_transactions_table: str = PROCESSED_TRANSACTIONS_TABLE,
-):
-    # Step 1: ETL for data preparation
-    etl_task = etl_step(
-        project_id=project_id,
-        dataset_id=bq_dataset_id,
-        source_table=raw_transactions_table,
-        processed_table=processed_transactions_table,
-    )
+# Install the fraud package as a Python module
+RUN pip install /opt/spark/work-dir/fraud
 
-    # Step 2: Parallel Model Training using with_items
-    # This loop dynamically creates a parallel task for each item in MODELS_TO_TRAIN.
-    # Each task will run independently and concurrently after the ETL step.
-    with kfp.dsl.ParallelFor(MODELS_TO_TRAIN) as model_item:
-        train_task = train_model_step(
-            project_id=project_id,
-            dataset_id=bq_dataset_id,
-            processed_table=processed_transactions_table,
-            model_name=model_item["name"], # Access dict keys for parameters
-            model_type=model_item["type"],
-        )
-        train_task.after(etl_task) # Each parallel task depends on the ETL step
+# Enable jemalloc as the default memory allocator (recommended for Spark)
+ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
 
-    # Step 3: Final step that waits for ALL parallel training tasks to complete
-    # The `final_pipeline_step` will automatically wait for all tasks in the
-    # `ParallelFor` loop that it directly depends on to finish.
-    # No need for individual `.after()` calls for each dynamic task.
-    final_pipeline_step_task = final_pipeline_step()
-    final_pipeline_step_task.after(train_task) # 'train_task' here refers to the *last* task created in the loop,
-                                               # but when used with ParallelFor, it correctly implies waiting for all.
+# Set PYSPARK_PYTHON to point to the virtual environment's Python
+ENV PYSPARK_PYTHON=/opt/venv/bin/python
 
+# Create the 'spark' user and group (UID 1099, GID 1099) for Vertex AI
+RUN groupadd -g 1099 spark && useradd -u 1099 -g spark -m spark
 
-# --- Pipeline Compilation and Submission ---
-if __name__ == "__main__":
-    compiler.Compiler().compile(
-        pipeline_func=fraud_detection_pipeline,
-        package_path="fraud_detection_pipeline.json",
-    )
-    print("Pipeline compiled to fraud_detection_pipeline.json")
+# Copy your training script (e.g., task.py) to the container
+COPY trainer/task.py /opt/spark/work-dir/task.py
 
-    # Optional: Submit the pipeline job directly from here (for testing/development)
-    # from google.cloud import aiplatform
+# Set permissions for the spark user
+RUN chown -R spark:spark /opt/spark/work-dir
 
-    # aiplatform.init(project=PROJECT_ID, location=REGION)
+# Set the working directory
+WORKDIR /opt/spark/work-dir
 
-    # job = aiplatform.PipelineJob(
-    #     display_name="fraud-bqml-matured-parallel-run",
-    #     template_path="fraud_detection_pipeline.json",
-    #     pipeline_root=PIPELINE_ROOT,
-    #     enable_caching=True,
-    # )
-    # job.run()
-    # print(f"Pipeline job submitted. View at: {job.console_uri}")
+# Set the entrypoint to run the training script
+ENTRYPOINT ["tini", "--", "python", "task.py"]
