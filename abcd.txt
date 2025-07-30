@@ -1,187 +1,67 @@
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import pandas_udf, col
-from pyspark.sql.types import ArrayType, FloatType, DoubleType, StructType, StructField
-import pandas as pd
-import xgboost as xgb
-import os
-import json # For reading model_metadata.json
-
-# --- Configuration ---
-GCS_BUCKET_NAME = "your-gcs-bucket-name"
-MODEL_DIRECTORY_PATH_IN_BUCKET = "path/to/your/model_folder" # e.g., "bqml_exports/my_classification_model"
-MODEL_BST_FILE_NAME = "model.bst"
-MODEL_METADATA_FILE_NAME = "model_metadata.json" # Optional, but highly recommended
-
-# Path to the model file on GCS
-GCS_MODEL_BST_PATH = f"gs://{GCS_BUCKET_NAME}/{MODEL_DIRECTORY_PATH_IN_BUCKET}/{MODEL_BST_FILE_NAME}"
-GCS_MODEL_METADATA_PATH = f"gs://{GCS_BUCKET_NAME}/{MODEL_DIRECTORY_PATH_IN_BUCKET}/{MODEL_METADATA_FILE_NAME}"
-
-# --- Initialize Spark Session ---
-# Ensure your Spark session is configured to access GCS.
-# This might involve setting configurations like:
-# .config("spark.hadoop.fs.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem")
-# .config("spark.hadoop.fs.AbstractFileSystem.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS")
-# .config("spark.hadoop.google.cloud.auth.service.account.enable", "true")
-# .config("spark.hadoop.google.cloud.auth.service.account.json.keyfile", "/path/to/your/gcp-service-account-key.json")
-# Or, if running on Dataproc/GCP environment, it might be pre-configured.
-
-spark = SparkSession.builder.appName("BigQueryML_XGBoost_Predict").getOrCreate()
-sc = spark.sparkContext
-
-# --- Helper function to download file from GCS (if needed by XGBoost loader on workers) ---
-# XGBoost's load_model might need a local path or a path accessible via Hadoop FileSystem APIs.
-# If direct GCS path loading fails in xgb.Booster().load_model(),
-# you might need to download the model file to each executor.
-# However, with the GCS connector properly configured, direct GCS paths should often work.
-
-# --- Load Feature Names from Metadata (Recommended) ---
-# This helps ensure the order and names of features are correct.
-feature_names = None
-try:
-    # In a real Spark job, you might need to read this file differently,
-    # e.g., download it or read it via Spark's textFile and then parse JSON.
-    # For simplicity, if this script runs where it can access GCS directly
-    # or if the metadata is small, you could download it to the driver first.
-
-    # Option 1: Read with Spark (if it's a small JSON file)
-    metadata_rdd = sc.textFile(GCS_MODEL_METADATA_PATH)
-    metadata_content = "".join(metadata_rdd.collect())
-    model_metadata = json.loads(metadata_content)
-    
-    # Extract feature names. The exact structure might vary based on BQML export version.
-    # Inspect your model_metadata.json to find the correct path to feature names.
-    # Example: it might be under 'feature_columns' or 'training_options.input_label_cols'
-    # For XGBoost models, it's often in a list of structs describing input features.
-    # This is a common pattern; adjust if your metadata structure is different.
-    if 'feature_columns' in model_metadata: # Hypothetical structure
-        feature_names = [fc['name'] for fc in model_metadata['feature_columns']]
-    elif 'schema' in model_metadata and 'fields' in model_metadata['schema']: # Another common structure
-        # Exclude label if present
-        label_name = model_metadata.get('training_options', {}).get('input_label_cols', [None])[0]
-        feature_names = [field['name'] for field in model_metadata['schema']['fields'] if field['name'] != label_name]
-    else:
-        print("Could not automatically determine feature names from metadata. Please define them manually.")
-        # MANUALLY DEFINE FEATURE NAMES IF METADATA IS NOT AVAILABLE OR PARSING FAILS:
-        # feature_names = ["feature1", "feature2", "feature3", ...]
-
-except Exception as e:
-    print(f"Could not load or parse model metadata from {GCS_MODEL_METADATA_PATH}: {e}")
-    print("Please ensure the path is correct and the file exists, or define feature_names manually.")
-    # MANUALLY DEFINE FEATURE NAMES IF METADATA IS NOT AVAILABLE:
-    # feature_names = ["feature1", "feature2", "feature3", ...]
-    # Example:
-    # feature_names = ['age', 'income', 'education_level_encoded', ...] # Replace with your actual feature names
-
-if not feature_names:
-    raise ValueError("Feature names could not be determined. Please check metadata or define them manually.")
-
-print(f"Using feature names: {feature_names}")
-
-# --- Broadcast the model path and feature names ---
-# This makes the model path and feature names available to all executor nodes.
-broadcasted_model_path = sc.broadcast(GCS_MODEL_BST_PATH)
-broadcasted_feature_names = sc.broadcast(feature_names)
-
-# --- Define Pandas UDF for Prediction ---
-# This UDF will load the model once per partition and make predictions.
-@pandas_udf(DoubleType()) # Assuming binary classification outputting a probability or a single class label as double
-# If your model outputs probabilities for multiple classes, you might use ArrayType(DoubleType())
-# and adjust the return accordingly. For simple classification, often a single prediction column is sufficient.
-def predict_with_xgboost_udf(iterator: pd.DataFrame) -> pd.Series:
-    # Load the model. This happens once per worker process for the given data partition.
-    model_path = broadcasted_model_path.value
-    bst = xgb.Booster()
-    try:
-        # Attempt to load model directly from GCS path
-        bst.load_model(model_path)
-    except Exception as e:
-        # Fallback: if direct GCS load fails, you might need to implement
-        # a mechanism to download the .bst file to a temporary local path on each worker
-        # and then load from there. This is more complex.
-        # For now, we assume direct GCS load works with a configured connector.
-        raise Exception(f"Failed to load XGBoost model from {model_path} on worker: {e}")
-
-    model_feature_names = broadcasted_feature_names.value
-
-    def predict_partition(df_partition):
-        # Ensure columns are in the correct order as expected by the model
-        # The input to this UDF is already a Pandas DataFrame (df_partition)
-        # Ensure it contains all columns listed in model_feature_names
-        try:
-            features_for_prediction = df_partition[model_feature_names]
-        except KeyError as e:
-            raise KeyError(f"One or more feature columns not found in input DataFrame: {e}. Available columns: {df_partition.columns.tolist()}")
-
-        dmatrix = xgb.DMatrix(features_for_prediction, feature_names=model_feature_names)
-        predictions = bst.predict(dmatrix)
-        return pd.Series(predictions)
-
-    # The input to a Pandas UDF with a single argument is an iterator of pandas.DataFrame or pandas.Series
-    # For batch processing, we usually get a single DataFrame representing a partition.
-    if isinstance(iterator, pd.DataFrame): # Common case for grouped map or simple map
-        return predict_partition(iterator)
-    else: # If iterator of DataFrames (e.g. from mapInPandas)
-        results = [predict_partition(df_part) for df_part in iterator]
-        return pd.concat(results) if results else pd.Series(dtype=float)
+<STATUS> : <ENV> <MODEL_NAME> - <SCORING/Training>
 
 
-# --- Prepare your input data ---
-# Example: Create a dummy DataFrame for prediction
-# Replace this with your actual data loading logic
-data_for_prediction = [
-    (1.0, 2.0, 3.0, 4.0), # Assuming 4 features for this example
-    (5.0, 6.0, 7.0, 8.0),
-]
-# Ensure these dummy_feature_names match your actual feature_names derived from metadata or manually set
-# If feature_names = ["f1", "f2", "f3", "f4"]
-dummy_feature_names_for_df_creation = feature_names[:len(data_for_prediction[0])] if feature_names else [f"feature_{i+1}" for i in range(len(data_for_prediction[0]))]
-
-input_df = spark.createDataFrame(data_for_prediction, dummy_feature_names_for_df_creation)
-
-# Ensure your input_df has columns with the same names as `feature_names`
-# and that they are in the correct order if your model is sensitive to it (XGBoost generally is by name if DMatrix is created with feature_names).
-
-# --- Make Predictions ---
-# The UDF expects a struct or multiple columns that it will combine into a Pandas DataFrame.
-# It's often cleaner to select the necessary feature columns before calling the UDF.
-# The current UDF takes the entire DataFrame partition and internally selects columns.
-
-# Select only the feature columns needed for prediction in the correct order
-# The Pandas UDF will receive a Pandas DataFrame containing these columns.
-# If the input `input_df` already has only the feature columns in some order,
-# the UDF will internally reorder/select them based on `broadcasted_feature_names`.
-
-# To make it explicit and ensure only necessary data is serialized to the UDF:
-if not all(f_name in input_df.columns for f_name in feature_names):
-    raise ValueError(f"Input DataFrame is missing one or more required feature columns. Required: {feature_names}, Available: {input_df.columns}")
-
-# The UDF `predict_with_xgboost_udf` is designed to take the whole DataFrame partition.
-# It internally selects the columns based on `broadcasted_feature_names.value`.
-# So, we can call it on the DataFrame directly.
-# However, the UDF is defined to take a single argument which will be filled with
-# a pandas DataFrame corresponding to the columns selected.
-# predictions_df = input_df.withColumn("prediction", predict_with_xgboost_udf(*[col(c) for c in feature_names]))
-# This above is more typical if the UDF explicitly takes features as separate args.
-
-# For a Pandas UDF that takes an iterator of DataFrames (or a single DataFrame per partition),
-# and expects certain columns to be present:
-predictions_df = input_df.select("*", predict_with_xgboost_udf(*feature_names).alias("prediction"))
-# Correction: A scalar Pandas UDF like this usually operates on selected columns.
-# The arguments to the UDF in `select` or `withColumn` become the columns of the pandas DataFrame inside the UDF.
-
-# Let's redefine how we call the Pandas UDF for clarity and correctness with scalar Pandas UDFs.
-# The UDF `predict_with_xgboost_udf` is defined as `def predict_with_xgboost_udf(iterator: pd.DataFrame)`
-# When called like `predict_with_xgboost_udf(col("feature1"), col("feature2"), ...)`
-# The `iterator` argument within the UDF will be a pandas DataFrame where each column corresponds
-# to one of the `col("featureX")` arguments passed.
-# So, we must ensure the order of columns passed to the UDF matches `feature_names`.
-
-selected_feature_cols = [col(c) for c in feature_names]
-predictions_df = input_df.withColumn("prediction", predict_with_xgboost_udf(*selected_feature_cols))
+<STATUS> : <ENV> <MODEL_NAME> - <SCORING/Training>
 
 
-# --- Show Predictions ---
-predictions_df.show()
+=== GCP Model Deployment Report ===
 
-# --- Stop Spark Session ---
-spark.stop()
+MODEL_NAME:     fraud_detector
+STATUS:         FAILURE
+PROJECT_ID:     ml-project-001
+VERSION:        v3.1
+ENVIRONMENT:    staging
+TIMESTAMP:      2025-07-30T14:27:15Z
+TRIGGERED_BY:   deploy-bot@company.com
+
+DETAILS:
+Deployment failed. Error: Invalid model signature in SavedModel.
+
+LOG_LINK:
+gs://ml-deploy-logs/fraud_detector/20250730/deploy.log
+
+=== END OF REPORT ===
+
+
+=== GCP Model Deployment Report ===
+
+MODEL_NAME:     customer_segmentation
+STATUS:         SUCCESS
+PROJECT_ID:     ml-project-001
+VERSION:        v1.4.2
+ENVIRONMENT:    production
+TIMESTAMP:      2025-07-30T14:25:00Z
+TRIGGERED_BY:   ci-pipeline@company.com
+
+DETAILS:
+Model deployed successfully.
+
+LOG_LINK:
+https://console.cloud.google.com/logs/query;query=resource.type="vertex_model"
+
+=== END OF REPORT ===
+body = f"""
+======================================================
+          GCP MODEL DEPLOYMENT NOTIFICATION
+======================================================
+
+MODEL_NAME    : {model_name}
+VERSION       : {version}
+STATUS        : {status}
+ENVIRONMENT   : {env}
+PROJECT_ID    : {project_id}
+TIMESTAMP     : {timestamp}
+TRIGGERED_BY  : {user}
+
+------------------------------------------------------
+DETAILS:
+{summary}
+
+------------------------------------------------------
+LOG LINK:
+{log_url}
+
+======================================================
+End of Notification
+======================================================
+"""
