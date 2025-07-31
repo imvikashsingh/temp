@@ -1,22 +1,19 @@
-# Use your existing Python 3.11 image based on Red Hat
+# Use your existing Red Hat-based image with Python 3.11
 FROM your-redhat-python11-image:latest
 
-# Set environment variables (optional, useful for Java apps)
-ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk \
+# Set environment variables for Java
+ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk \
     PATH=$JAVA_HOME/bin:$PATH
 
-# Install Java (OpenJDK 17 in this case, change version if needed)
+# Install Java 11 (OpenJDK)
 USER root
 
 RUN yum -y update && \
-    yum -y install java-17-openjdk java-17-openjdk-devel && \
+    yum -y install java-11-openjdk java-11-openjdk-devel && \
     yum clean all
 
-# Verify installations (optional)
+# Optional: verify installation
 RUN java -version && python3 --version
 
-# Set default user if needed
-# USER someuser
-
-# Define default command (optional)
+# Default command
 CMD ["bash"]
