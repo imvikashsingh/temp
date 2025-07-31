@@ -1,56 +1,41 @@
-# fraud/entrypoints/training.py
-import argparse
-from kfp.dsl import OutputPath
-from fraud.training import run as run_training_logic
+# Dockerfile
 
+# Use an official Python runtime as a parent image
+FROM python:3.11-slim
 
-# fraud/training.py
-from google.cloud import bigquery
-import logging
+# Set environment variables for Spark
+ENV SPARK_VERSION=3.5.0
+ENV HADOOP_VERSION=3
+ENV SPARK_HOME=/opt/spark
+ENV PATH=$SPARK_HOME/bin:$PATH
+ENV PYSPARK_PYTHON=/usr/bin/python3
+ENV PYSPARK_DRIVER_PYTHON=/usr/bin/python3
 
-logging.basicConfig(level=logging.INFO)
+# Install system dependencies, including Java (required for Spark)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openjdk-11-jre-headless \
+    curl \
+    gnupg \
+    && rm -rf /var/lib/apt/lists/*
 
-def run(project_id: str, source_table_id: str, model_type: str) -> str:
-    """Trains a BQML model and returns its full ID."""
-    client = bigquery.Client(project=project_id)
-    dataset_id = source_table_id.split('.')[1]
-    model_id = f"{project_id}.{dataset_id}.fraud_model_{model_type}"
+# Download and install Spark
+RUN curl -o /tmp/spark.tgz https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION}.tgz \
+    && tar -zxvf /tmp/spark.tgz -C /opt \
+    && mv /opt/spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION} ${SPARK_HOME} \
+    && rm /tmp/spark.tgz
 
-    logging.info(f"Starting training for model {model_id} from table {source_table_id}")
-    
-    sql = f"""
-    CREATE OR REPLACE MODEL `{model_id}`
-    OPTIONS(
-        MODEL_TYPE='{model_type}',
-        INPUT_LABEL_COLS=['Class'],
-        AUTO_CLASS_WEIGHTS=TRUE
-    ) AS
-    SELECT
-      * EXCEPT(Time)
-    FROM
-      `{source_table_id}`
-    """
+# Download the GCS connector JAR and place it in Spark's jars directory
+RUN curl -o ${SPARK_HOME}/jars/gcs-connector-hadoop3-latest.jar https://storage.googleapis.com/hadoop-lib/gcs/gcs-connector-hadoop3-latest.jar
 
-    job = client.query(sql)
-    job.result()
+# Set the working directory
+WORKDIR /app
 
-    logging.info(f"Training completed. Model created: {model_id}")
-    return model_id
+# Copy the dependencies file and install Python packages
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy the training application code
+COPY src/ /app/src/
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--project-id', type=str, required=True)
-    parser.add_argument('--source-table-id', type=str, required=True)
-    parser.add_argument('--model-type', type=str, required=True)
-    parser.add_argument('--model-id-path', type=OutputPath(str))
-    args = parser.parse_args()
-
-    model_id = run_training_logic(
-        project_id=args.project_id,
-        source_table_id=args.source_table_id,
-        model_type=args.model_type
-    )
-
-    with open(args.model_id_path, 'w') as f:
-        f.write(model_id)
+# Set the entrypoint for the container. The command will be provided by Vertex AI.
+ENTRYPOINT ["python3", "src/train.py"]
