@@ -1,8 +1,8 @@
 # Dockerfile
 
-# Use a base image with Python 3.11 and Java installed for PySpark 3.5
-# This image is based on Debian and includes OpenJDK 17, suitable for PySpark 3.5
-FROM openjdk:17-jdk-slim-buster
+# Use a base image with Python 3.11 and Java 11 installed for PySpark 3.5
+# This image is based on Debian and includes OpenJDK 11, suitable for PySpark 3.5
+FROM openjdk:11-jdk-slim-buster
 
 # Install Python 3.11 and pip
 RUN apt-get update && \
@@ -20,21 +20,19 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
 # Set environment variables for PySpark
 ENV SPARK_HOME="/opt/spark"
 ENV PATH="${PATH}:${SPARK_HOME}/bin"
-ENV JAVA_HOME="/usr/lib/jvm/java-17-openjdk-amd64" # Adjust if your Java installation path differs
-
-# Install PySpark 3.5.0, scikit-learn, pandas, joblib, and Google Cloud AI Platform SDK
-# Using --no-cache-dir for smaller image size
-RUN pip install --no-cache-dir \
-    pyspark==3.5.0 \
-    scikit-learn==1.4.2 \
-    pandas==2.2.2 \
-    numpy==1.26.4 \
-    joblib==1.4.2 \
-    google-cloud-aiplatform==1.49.0 \
-    google-cloud-storage==2.11.0 # Required for gsutil cp or direct GCS interaction
+ENV JAVA_HOME="/usr/lib/jvm/java-11-openjdk-amd64" # Adjusted for Java 11
 
 # Create a working directory in the container
 WORKDIR /app
+
+# Copy your requirements.txt file into the container
+# It's good practice to copy this before copying the rest of the code
+# to leverage Docker layer caching if only requirements change.
+COPY requirements.txt /app/
+
+# Install Python dependencies from requirements.txt
+# Using --no-cache-dir for smaller image size
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
 # Copy your entire source code directory into the container
 # Assuming your project root has a 'src' directory
