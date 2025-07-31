@@ -1,137 +1,22 @@
-import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Date, Boolean
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+# Use your existing Python 3.11 image based on Red Hat
+FROM your-redhat-python11-image:latest
 
-# Database configuration - adjust for your DB
-DATABASE_URI = "sqlite:///etl_tracker.db"  # Example for SQLite
-# For PostgreSQL: "postgresql://user:password@localhost/dbname"
-# For MySQL: "mysql+pymysql://user:password@localhost/dbname"
+# Set environment variables (optional, useful for Java apps)
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk \
+    PATH=$JAVA_HOME/bin:$PATH
 
-Base = declarative_base()
+# Install Java (OpenJDK 17 in this case, change version if needed)
+USER root
 
-class ETLAudit(Base):
-    """Database model for tracking ETL executions"""
-    __tablename__ = 'etl_audit'
-    
-    id = Column(Integer, primary_key=True)
-    run_date = Column(Date, nullable=False)
-    run_type = Column(String(10), nullable=False)  # 'daily' or 'monthly'
-    success = Column(Boolean, nullable=False)
-    timestamp = Column(String(20), nullable=False)
-    month_year = Column(String(7), nullable=False)  # Format 'YYYY-MM'
+RUN yum -y update && \
+    yum -y install java-17-openjdk java-17-openjdk-devel && \
+    yum clean all
 
-# Database setup
-engine = create_engine(DATABASE_URI)
-Session = sessionmaker(bind=engine)
-Base.metadata.create_all(engine)
+# Verify installations (optional)
+RUN java -version && python3 --version
 
-class ETLAuditDB:
-    """Handles database operations for ETL tracking"""
-    def __init__(self):
-        self.session = Session()
-        
-    def log_execution(self, run_date, run_type, success):
-        """Log an ETL execution to database"""
-        record = ETLAudit(
-            run_date=run_date,
-            run_type=run_type,
-            success=success,
-            timestamp=datetime.datetime.now().isoformat(),
-            month_year=run_date.strftime("%Y-%m")
-        )
-        self.session.add(record)
-        self.session.commit()
-        
-    def validate_previous_month(self):
-        """Check if all days in previous month had successful daily ETL runs"""
-        today = datetime.date.today()
-        first_of_month = today.replace(day=1)
-        prev_month = first_of_month - datetime.timedelta(days=1)
-        
-        # Get all dates in previous month
-        days_in_prev_month = (first_of_month - datetime.timedelta(days=1)).day
-        all_dates = [
-            datetime.date(prev_month.year, prev_month.month, day) 
-            for day in range(1, days_in_prev_month + 1)
-        ]
-        
-        # Get successful executions from database
-        month_str = prev_month.strftime("%Y-%m")
-        executions = self.session.query(ETLAudit.run_date).filter(
-            ETLAudit.month_year == month_str,
-            ETLAudit.run_type == 'daily',
-            ETLAudit.success == True
-        ).all()
-        
-        executed_dates = {e.run_date for e in executions}
-        return all(date in executed_dates for date in all_dates)
-        
-    def monthly_extract_ran(self, month_year):
-        """Check if monthly extract already ran for given month"""
-        return self.session.query(ETLAudit).filter(
-            ETLAudit.month_year == month_year,
-            ETLAudit.run_type == 'monthly'
-        ).first() is not None
-        
-    def close(self):
-        self.session.close()
+# Set default user if needed
+# USER someuser
 
-# Your existing ETL functions
-def daily_extract():
-    print("Running daily extract...")
-    # Your existing extract logic
-    return True
-
-def daily_transform():
-    print("Running daily transform...")
-    # Your existing transform logic
-    return True
-
-def daily_load():
-    print("Running daily load...")
-    # Your existing load logic
-    return True
-
-# New monthly extraction
-def monthly_extract():
-    print("Running monthly extract...")
-    # Your monthly extraction logic
-    return True
-
-def run_daily_etl():
-    """Execute daily ETL pipeline with database tracking"""
-    db = ETLAuditDB()
-    today = datetime.date.today()
-    prev_month = (today.replace(day=1) - datetime.timedelta(days=1)).strftime("%Y-%m")
-    
-    try:
-        # Run daily ETL
-        success = (
-            daily_extract() and 
-            daily_transform() and 
-            daily_load()
-        )
-        
-        # Log execution to database
-        db.log_execution(today, 'daily', success)
-        
-        # Check if we should run monthly extract (on 1st of month)
-        if today.day == 1 and not db.monthly_extract_ran(prev_month):
-            if db.validate_previous_month():
-                monthly_success = monthly_extract()
-                db.log_execution(today, 'monthly', monthly_success)
-            else:
-                print("Skipping monthly extract - not all daily ETLs completed last month")
-                
-        return success
-        
-    except Exception as e:
-        db.log_execution(today, 'daily', False)
-        print(f"ETL failed: {str(e)}")
-        return False
-    finally:
-        db.close()
-
-if __name__ == "__main__":
-    run_daily_etl()
+# Define default command (optional)
+CMD ["bash"]
