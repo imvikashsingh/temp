@@ -1,81 +1,52 @@
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import udf
-from pyspark.sql.types import StringType
-from Crypto.Cipher import AES
-import base64
+# Dockerfile
 
-# Initialize SparkSession
-spark = SparkSession.builder \
-    .appName("Data Encryption") \
-    .getOrCreate()
+# Use a base image with Python 3.11 and Java installed for PySpark 3.5
+# This image is based on Debian and includes OpenJDK 17, suitable for PySpark 3.5
+FROM openjdk:17-jdk-slim-buster
 
-# Sample DataFrame with sensitive data
-data = [("John", "Doe", "john.doe@email.com", "123-45-6789"),
-        ("Jane", "Doe", "jane.doe@email.com", "987-65-4321"),
-        ("Alice", "Smith", "alice.smith@email.com", "555-55-5555")]
+# Install Python 3.11 and pip
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3-pip \
+    python3.11-venv \
+    curl \
+    gnupg \
+    && rm -rf /var/lib/apt/lists/*
 
-columns = ["first_name", "last_name", "email", "ssn"]
+# Set Python 3.11 as default python
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
 
-df = spark.createDataFrame(data, columns)
+# Set environment variables for PySpark
+ENV SPARK_HOME="/opt/spark"
+ENV PATH="${PATH}:${SPARK_HOME}/bin"
+ENV JAVA_HOME="/usr/lib/jvm/java-17-openjdk-amd64" # Adjust if your Java installation path differs
 
-# Encryption key (16, 24, or 32 bytes long)
-encryption_key = b'This is a 16-byte key'
+# Install PySpark 3.5.0, scikit-learn, pandas, joblib, and Google Cloud AI Platform SDK
+# Using --no-cache-dir for smaller image size
+RUN pip install --no-cache-dir \
+    pyspark==3.5.0 \
+    scikit-learn==1.4.2 \
+    pandas==2.2.2 \
+    numpy==1.26.4 \
+    joblib==1.4.2 \
+    google-cloud-aiplatform==1.49.0 \
+    google-cloud-storage==2.11.0 # Required for gsutil cp or direct GCS interaction
 
-# Function to encrypt data
-def encrypt_data(data):
-    cipher = AES.new(encryption_key, AES.MODE_EAX)
-    ciphertext, tag = cipher.encrypt_and_digest(data.encode('utf-8'))
-    return base64.b64encode(cipher.nonce + tag + ciphertext).decode('utf-8')
+# Create a working directory in the container
+WORKDIR /app
 
-# User-defined function (UDF) for encryption
-encrypt_udf = udf(encrypt_data, StringType())
+# Copy your entire source code directory into the container
+# Assuming your project root has a 'src' directory
+COPY src /app/src
 
-# Encrypt sensitive columns
-encrypted_df = df.withColumn("email", encrypt_udf("email")) \
-                 .withColumn("ssn", encrypt_udf("ssn"))
+# Set the entrypoint for the container
+# This command will be executed when the container starts
+# The script expects arguments for data-path and model-dir
+ENTRYPOINT ["python", "-m", "src.fraud.train"]
 
-# Display encrypted DataFrame
-encrypted_df.show(truncate=False)
-
-# Stop SparkSession
-spark.stop()
-
-
-
-
-
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, when
-
-# Initialize SparkSession
-spark = SparkSession.builder \
-    .appName("Data Masking") \
-    .getOrCreate()
-
-# Sample DataFrame with sensitive data
-data = [("John", "Doe", "john.doe@email.com", "123-45-6789"),
-        ("Jane", "Doe", "jane.doe@email.com", "987-65-4321"),
-        ("Alice", "Smith", "alice.smith@email.com", "555-55-5555")]
-
-columns = ["first_name", "last_name", "email", "ssn"]
-
-df = spark.createDataFrame(data, columns)
-
-# Columns to mask
-columns_to_mask = ["email", "ssn"]
-
-# Function to mask sensitive data
-def mask_data(column, data):
-    return "****" if column in columns_to_mask else data
-
-# Masking sensitive columns
-masked_df = df.select(
-    *[when(col(column).isNotNull(), mask_data(column, col(column))).alias(column) for column in df.columns]
-)
-
-# Display masked data
-masked_df.show()
-
-# Stop SparkSession
-spark.stop()
-
+# Example of how to build and run locally (for testing):
+# docker build -t fraud-detector-trainer .
+# docker run -it fraud-detector-trainer --data-path /app/src/fraud/dummy_data.csv --model-dir /tmp/models
+# Note: For local testing, you might need to create a dummy_data.csv if you modify load_data_with_pyspark
+# to read from a local file instead of generating data.
