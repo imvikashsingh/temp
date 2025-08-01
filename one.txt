@@ -1,0 +1,27 @@
+import argparse
+from ast import literal_eval
+
+def parse_list_string(list_str):
+    try:
+        # Safely evaluate the string as a Python literal
+        parsed_list = literal_eval(list_str)
+        if not isinstance(parsed_list, list):
+            raise argparse.ArgumentTypeError("Input must be a valid list")
+        return parsed_list
+    except (ValueError, SyntaxError) as e:
+        raise argparse.ArgumentTypeError(f"Invalid list format: {e}")
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--items',
+        type=parse_list_string,
+        required=True,
+        help='List of items as a string, e.g. "[\"apple\", \"banana\"]"'
+    )
+    args = parser.parse_args()
+    print("Parsed list:", args.items)
+    print("Type:", type(args.items))
+
+if __name__ == '__main__':
+    main()
