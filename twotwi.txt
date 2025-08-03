@@ -1,0 +1,35 @@
+RUN curl -L https://archive.apache.org/dist/hadoop/common/hadoop-3.3.4/hadoop-3.3.4.tar.gz | tar -xz -C /opt/ \
+    && mv /opt/hadoop-3.3.4 /opt/hadoop
+
+
+FROM python:3.11-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    openjdk-11-jre-headless \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Hadoop
+RUN curl -L https://archive.apache.org/dist/hadoop/common/hadoop-3.3.4/hadoop-3.3.4.tar.gz | tar -xz -C /opt/ \
+    && mv /opt/hadoop-3.3.4 /opt/hadoop
+
+# Set environment variables
+ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64 \
+    HADOOP_HOME=/opt/hadoop \
+    SPARK_HOME=/opt/spark \
+    PATH=$PATH:/opt/hadoop/bin
+
+# Install Python libraries
+RUN pip install pyspark==3.5.0 pandas scikit-learn google-cloud numpy pyarrow
+
+# Add BigQuery connector JAR
+COPY spark-bigquery-with-dependencies_2.12-0.36.0.jar $SPARK_HOME/jars/
+
+# Configure Spark
+RUN mkdir -p $SPARK_HOME/conf \
+    && echo "spark.jars.packages com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.36.0" > $SPARK_HOME/conf/spark-defaults.conf
+
+# Set working directory
+WORKDIR /app
+CMD ["bash"]
