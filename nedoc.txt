@@ -1,0 +1,41 @@
+# Base image: Red Hat UBI 9 with Python 3.11
+FROM registry.access.redhat.com/ubi9/python-311
+
+USER root
+
+# Install Java 11 (required by Spark)
+RUN yum -y update && \
+    yum -y install java-11-openjdk java-11-openjdk-devel && \
+    yum clean all
+
+# Define environment variables
+ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk \
+    SPARK_VERSION=3.5.0 \
+    HADOOP_VERSION=3 \
+    SPARK_HOME=/opt/spark \
+    PYSPARK_PYTHON=python3 \
+    PYSPARK_DRIVER_PYTHON=python3 \
+    PATH=$PATH:/opt/spark/bin
+
+# Download and install Spark
+RUN wget -q https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop3.tgz && \
+    tar xzf spark-${SPARK_VERSION}-bin-hadoop3.tgz && \
+    mv spark-${SPARK_VERSION}-bin-hadoop3 /opt/spark && \
+    rm spark-${SPARK_VERSION}-bin-hadoop3.tgz
+
+# Add Spark BigQuery connector JAR
+RUN mkdir -p ${SPARK_HOME}/jars && \
+    curl -L -o ${SPARK_HOME}/jars/spark-bigquery-with-dependencies_2.12-0.36.1.jar \
+    https://repo1.maven.org/maven2/com/google/cloud/spark/spark-bigquery-with-dependencies_2.12/0.36.1/spark-bigquery-with-dependencies_2.12-0.36.1.jar
+
+# Set workdir to /app
+WORKDIR /app
+
+# Copy Python code
+COPY . /app
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Default command
+CMD ["spark-submit", "fraud/model.py"]
