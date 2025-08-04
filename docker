@@ -1,0 +1,37 @@
+FROM python:3.11-slim
+
+# Install Java and other dependencies
+RUN apt-get update && \
+    apt-get install -y openjdk-17-jre-headless wget && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set environment variables
+ENV PYSPARK_VERSION=3.5.0
+ENV SPARK_HOME=/opt/spark
+ENV PATH=$PATH:$SPARK_HOME/bin
+ENV PYTHONPATH=/app
+
+# Download and install Spark
+RUN wget -q https://archive.apache.org/dist/spark/spark-${PYSPARK_VERSION}/spark-${PYSPARK_VERSION}-bin-hadoop3.tgz && \
+    tar xzf spark-${PYSPARK_VERSION}-bin-hadoop3.tgz && \
+    mv spark-${PYSPARK_VERSION}-bin-hadoop3 /opt/spark && \
+    rm spark-${PYSPARK_VERSION}-bin-hadoop3.tgz
+
+# Add BigQuery Spark connector JAR
+RUN wget -q https://repo1.maven.org/maven2/com/google/cloud/spark/spark-bigquery-with-dependencies_2.12/0.32.0/spark-bigquery-with-dependencies_2.12-0.32.0.jar -P /opt/spark/jars/
+
+WORKDIR /app
+
+# Copy requirements and install
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY fraud ./fraud
+COPY scripts ./scripts
+
+# Make scripts executable
+RUN chmod +x ./scripts/*.sh
+
+ENTRYPOINT ["./scripts/entrypoint.sh"]
