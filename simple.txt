@@ -1,19 +1,41 @@
-# Use your existing Red Hat-based image with Python 3.11
-FROM your-redhat-python11-image:latest
+severity=ERROR AND textPayload:"SCRIPT_FAILURE"
+severity=INFO AND textPayload:"SCRIPT_SUCCESS"
 
-# Set environment variables for Java
-ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk \
-    PATH=$JAVA_HOME/bin:$PATH
+-----
 
-# Install Java 11 (OpenJDK)
-USER root
+import logging
+import sys
 
-RUN yum -y update && \
-    yum -y install java-11-openjdk java-11-openjdk-devel && \
-    yum clean all
+# Configure logging to output to standard error, which is captured by Cloud Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(levelname)s: %(message)s',
+    stream=sys.stderr  # Use stderr for logs
+)
 
-# Optional: verify installation
-RUN java -version && python3 --version
+def your_main_logic():
+    """
+    This function contains the core logic of your script.
+    It will be wrapped in a try/except block.
+    """
+    print("Starting the main task...")
+    
+    # --- YOUR SCRIPT'S CODE GOES HERE ---
+    
+    # To test the failure alert, uncomment the following line:
+    # raise ValueError("A critical error occurred!")
+    
+    print("Task finished.")
 
-# Default command
-CMD ["bash"]
+
+if __name__ == "__main__":
+    try:
+        your_main_logic()
+        # If the script reaches this point without an error, log success
+        logging.info("SCRIPT_SUCCESS: Script completed successfully.")
+
+    except Exception as e:
+        # If any exception occurs, log it as a failure
+        logging.error(f"SCRIPT_FAILURE: Script failed with an error. Details: {e}", exc_info=True)
+        # Exit with a non-zero status code to indicate failure
+        sys.exit(1)
